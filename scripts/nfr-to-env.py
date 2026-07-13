@@ -92,6 +92,31 @@ def main():
                 f'export K6_CHAOS_{exp_key}_RECOVERY_THRESHOLD={recovery}'
             )
 
+    # --- Workload sizing (K8S_* vars) ---
+    # Source of truth: resources.sizing + resources.sizing_guide[tier]
+    # Pipeline can pass these to Helm as --set or compare them in a drift gate.
+    resources_cfg = nfr.get('resources', {})
+    sizing = resources_cfg.get('sizing')
+    if sizing:
+        sizing_guide = resources_cfg.get('sizing_guide', {})
+        tier = sizing_guide.get(sizing)
+        if tier:
+            lines.append(f'export K8S_SIZING={sizing}')
+            lines.append(f'export K8S_REPLICAS={tier.get("replicas", "")}')
+            req = tier.get('requests', {})
+            lim = tier.get('limits', {})
+            if 'cpu' in req:
+                lines.append(f'export K8S_REQUESTS_CPU={req["cpu"]}')
+            if 'memory' in req:
+                lines.append(f'export K8S_REQUESTS_MEMORY={req["memory"]}')
+            if 'cpu' in lim:
+                lines.append(f'export K8S_LIMITS_CPU={lim["cpu"]}')
+            if 'memory' in lim:
+                lines.append(f'export K8S_LIMITS_MEMORY={lim["memory"]}')
+        else:
+            print(f'nfr-to-env: WARNING — sizing="{sizing}" not found in sizing_guide',
+                  file=sys.stderr)
+
     # Write output
     with open(args.output, 'w') as f:
         f.write('\n'.join(lines) + '\n')

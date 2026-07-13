@@ -9,6 +9,8 @@ Exit 1 if any CRITICAL gate fails. Output: <artifacts>/gate-summary.json
 import argparse
 import json
 import os
+import re
+import subprocess
 import sys
 
 
@@ -30,6 +32,121 @@ def load_k6_result(path):
     return json.loads(lines[-1].strip())
 
 
+# --- Kubernetes resource quantity parsing (stdlib only) ---
+# ponytail: covers only what nfr.yaml/values emit (m, Ki/Mi/Gi, plain int).
+# Not full k8s resource.Quantity — no decimal-suffix memory, no scientific notation.
+_CPU_SUFFIXES = {'m': 0.001}
+_MEM_BINARY = {'Ki': 1024, 'Mi': 1024**2, 'Gi': 1024**3, 'Ti': 1024**4}
+_MEM_DECIMAL = {'k': 1000, 'M': 1000**2, 'G': 1000**3, 'T': 1000**4}
+
+
+def parse_cpu(s):
+    """Return CPU in millicores (int). 500m -> 500; 1 -> 1000; 0.5 -> 500."""
+    if s is None or s == '':
+        return None
+    s = str(s).strip()
+    if s.endswith('m'):
+        return int(s[:-1])
+    val = float(s)
+    return int(val * 1000)
+
+
+def parse_mem(s):
+    """Return memory in bytes (int). 1Gi -> 1073741824; 512Mi -> 536870912."""
+    if s is None or s == '':
+        return None
+    s = str(s).strip()
+    for suffix, mult in _MEM_BINARY.items():
+        if s.endswith(suffix):
+            return int(float(s[:-len(suffix)])) * mult
+    for suffix, mult in _MEM_DECIMAL.items():
+        if s.endswith(suffix):
+            return int(float(s[:-len(suffix)])) * mult
+    return int(float(s))
+
+
+def get_cluster_state(service, namespace='app'):
+    """Read live Deployment resources via kubectl. Return dict or None on failure."""
+    # ponytail: jsonpath with -o json is simpler than parsing jsonpath output.
+    cmd = [
+        'kubectl', 'get', 'deployment', service,
+        '-n', namespace, '-o', 'json', '--ignore-not-found',
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        deploy = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    spec = deploy.get('spec', {})
+    containers = spec.get('template', {}).get('spec', {}).get('containers', [])
+    if not containers:
+        return None
+    c = containers[0]
+    res = c.get('resources', {})
+    return {
+        'replicas': spec.get('replicas', 0),
+        'requests': res.get('requests', {}),
+        'limits': res.get('limits', {}),
+    }
+
+
+def check_sizing_drift(nfr, service, check_fn, namespace='app'):
+    """
+    Compare declared sizing tier (nfr.yaml) vs live Deployment resources.
+    Adds gates: replicas, requests.{cpu,memory}, limits.{cpu,memory}.
+    Returns True if all drift checks added; False if skipped (no live state).
+    """
+    resources_cfg = nfr.get('resources', {})
+    sizing = resources_cfg.get('sizing')
+    if not sizing:
+        print('\n--- Sizing Drift Gate: no `resources.sizing` declared in nfr.yaml ---')
+        return False
+
+    tier = resources_cfg.get('sizing_guide', {}).get(sizing)
+    if not tier:
+        print(f'\n--- Sizing Drift Gate: tier "{sizing}" not found in sizing_guide ---')
+        return False
+
+    print(f'\n--- Sizing Drift Gate (tier={sizing}) ---')
+
+    actual = get_cluster_state(service, namespace)
+    if actual is None:
+        print('  WARNING: could not read live deployment (kubectl unavailable or not deployed)')
+        return False
+
+    # Replicas
+    expected_replicas = tier.get('replicas')
+    actual_replicas = actual.get('replicas')
+    check_fn('replicas', actual_replicas, '==', expected_replicas,
+             'critical', 'sizing_replicas')
+
+    # requests + limits (CPU in millicores, memory in bytes)
+    for kind in ('requests', 'limits'):
+        expected = tier.get(kind, {})
+        actual_kind = actual.get(kind, {})
+        for resource in ('cpu', 'memory'):
+            exp_val = expected.get(resource)
+            act_val = actual_kind.get(resource)
+            if exp_val is None or act_val is None:
+                continue
+            if resource == 'cpu':
+                exp_norm = parse_cpu(exp_val)
+                act_norm = parse_cpu(act_val)
+            else:
+                exp_norm = parse_mem(exp_val)
+                act_norm = parse_mem(act_val)
+            metric_name = f'{kind}.{resource}'
+            # Display raw values (more readable), compare normalized
+            check_fn(metric_name, act_norm, '==', exp_norm,
+                     'critical', f'sizing_{kind}_{resource}')
+    return True
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Evaluate NFR gates against test results'
@@ -39,6 +156,10 @@ def main():
     parser.add_argument('--nfr', required=True, help='Path to nfr.yaml')
     parser.add_argument('--service', required=True,
                         help='Service name (catalogo, pagamento, pedido)')
+    parser.add_argument('--namespace', default='app',
+                        help='Namespace where the service is deployed')
+    parser.add_argument('--skip-sizing-drift', action='store_true',
+                        help='Skip sizing drift check (kubectl vs nfr.yaml)')
     args = parser.parse_args()
 
     nfr = parse_yaml(args.nfr)
@@ -56,6 +177,8 @@ def main():
                 passed = float(actual) >= float(threshold)
             elif operator_str == '>':
                 passed = float(actual) > float(threshold)
+            elif operator_str == '==':
+                passed = float(actual) == float(threshold)
         except (ValueError, TypeError):
             passed = False
 
@@ -193,6 +316,14 @@ def main():
         c_failed = c_metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
         check('http_req_failed (during chaos)', c_failed, '<',
               0.05, 'warning', 'chaos_http_req_failed')
+
+    # ============================================================
+    # Sizing Drift Gate (CRITICAL)
+    # Compares declared nfr.yaml sizing tier vs live Deployment resources.
+    # Requires kubectl + cluster access. Skip with --skip-sizing-drift.
+    # ============================================================
+    if not args.skip_sizing_drift:
+        check_sizing_drift(nfr, service, check, args.namespace)
 
     # ============================================================
     # Output
