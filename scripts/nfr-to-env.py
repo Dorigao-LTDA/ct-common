@@ -30,14 +30,14 @@ def main():
 
     nfr = parse_yaml(args.nfr)
     perf = nfr.get('performance', {})
-    http = perf.get('http', {})
-    global_thresholds = http.get('thresholds', {})
     scenarios = perf.get('scenarios', {})
     lines = []
 
-    # --- Business errors threshold (global) ---
+    # --- Business errors threshold (from baseline scenario) ---
+    baseline_sc = scenarios.get('baseline', {})
+    baseline_th = baseline_sc.get('thresholds', {})
     biz_errors = (
-        global_thresholds.get('business_errors', {}).get('rate', 0.05)
+        baseline_th.get('business_errors', {}).get('rate', 0.05)
     )
     lines.append(f'export K6_BUSINESS_ERRORS_THRESHOLD={biz_errors}')
 

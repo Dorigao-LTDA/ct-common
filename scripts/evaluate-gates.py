@@ -113,42 +113,43 @@ def main():
     if baseline:
         print('\n--- Baseline Gate (CRITICAL) ---')
         metrics = baseline.get('metrics', {})
-        bl = (nfr.get('performance', {}).get('http', {})
-              .get('thresholds', {}))
+        bl = (nfr.get('performance', {}).get('scenarios', {})
+              .get('baseline', {}).get('thresholds', {}))
+        bl_gate = bl.get('gate', 'critical') if isinstance(bl, dict) else 'critical'
 
         # http_req_failed
         failed_rate = metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
         th = bl.get('http_req_failed', {})
         check('http_req_failed', failed_rate, '<',
-              th.get('rate', 0.01), th.get('gate', 'critical'),
+              th.get('rate', 0.01), bl_gate,
               'baseline_http_req_failed')
 
         # http_req_duration p95
         p95 = metrics.get('http_req_duration', {}).get('values', {}).get('p(95)', 0)
         th = bl.get('http_req_duration', {})
         check('http_req_duration.p95', p95, '<',
-              th.get('p95', 300), th.get('gate', 'critical'),
+              th.get('p95', 300), bl_gate,
               'baseline_p95')
 
         # http_req_duration p99
         p99 = metrics.get('http_req_duration', {}).get('values', {}).get('p(99)', 0)
         th = bl.get('http_req_duration', {})
         check('http_req_duration.p99', p99, '<',
-              th.get('p99', 800), th.get('gate', 'critical'),
+              th.get('p99', 800), bl_gate,
               'baseline_p99')
 
-        # throughput
+        # throughput (per-scenario: http_reqs.rate, not throughput.min)
         throughput = metrics.get('http_reqs', {}).get('values', {}).get('rate', 0)
-        th = bl.get('throughput', {})
+        th = bl.get('http_reqs', {})
         check('http_reqs', throughput, '>=',
-              th.get('min', 50), th.get('gate', 'warning'),
+              th.get('rate', 50), 'warning',
               'baseline_throughput')
 
         # business errors
         biz = metrics.get(f'{service}_errors', {}).get('values', {}).get('rate', 0)
         th = bl.get('business_errors', {})
         check(f'{service}_errors', biz, '<',
-              th.get('rate', 0.05), th.get('gate', 'critical'),
+              th.get('rate', 0.05), bl_gate,
               'baseline_business_errors')
     else:
         print('\n--- Baseline Gate: results not available (SKIPPED) ---')
