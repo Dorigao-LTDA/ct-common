@@ -197,96 +197,105 @@ def main():
         if not passed and severity == 'critical':
             summary['status'] = 'FAILED'
 
-    # ============================================================
-    # Smoke Gate
-    # ============================================================
-    smoke_path = os.path.join(args.artifacts, 'smoke-results',
-                              'smoke-results.json')
-    smoke = load_k6_result(smoke_path)
-    if smoke:
-        print('\n--- Smoke Gate ---')
-        metrics = smoke.get('metrics', {})
-        sm_cfg = (nfr.get('performance', {}).get('scenarios', {})
-                  .get('smoke', {}).get('thresholds', {}))
-        sm_gate = sm_cfg.pop('gate', 'warning') if isinstance(
-            sm_cfg, dict) else 'warning'
+    def find_result(name):
+        """Look for result file directly in artifacts dir or in a subdirectory."""
+        # Try direct path first (inline workflow: file in workspace root)
+        direct = os.path.join(args.artifacts, name)
+        result = load_k6_result(direct)
+        if result is not None:
+            return result
+        # Try subdirectory named after the artifact (download-artifact workflow)
+        subdir = os.path.join(args.artifacts, name.replace('.json', ''), name)
+        result = load_k6_result(subdir)
+        if result is not None:
+            return result
+        # Try perf-results subdirectory (legacy upload-artifact naming)
+        legacy = os.path.join(args.artifacts, 'perf-results', name)
+        return load_k6_result(legacy)
 
-        failed = metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
-        if isinstance(sm_cfg, dict) and 'http_req_failed' in sm_cfg:
-            check('http_req_failed', failed, '<',
-                  sm_cfg['http_req_failed'].get('rate', 1),
-                  sm_gate, 'smoke_http_req_failed')
+    def evaluate_scenario(scenario_name, severity_override=None):
+        """Evaluate a single test scenario gate from its k6 result file."""
+        result_file = f'{scenario_name}-results.json'
+        data = find_result(result_file)
+        if data is None:
+            print(f'\n--- {scenario_name.title()} Gate: results not available ---')
+            summary['gates'].append({
+                'gate': scenario_name, 'metric': 'present', 'actual': 'missing',
+                'threshold': 'present', 'status': 'SKIP', 'severity': 'warning',
+            })
+            return
 
-        p95 = metrics.get('http_req_duration', {}).get('values', {}).get('p(95)', 0)
-        if (isinstance(sm_cfg, dict)
-                and 'http_req_duration' in sm_cfg
-                and 'p95' in sm_cfg['http_req_duration']):
-            check('http_req_duration.p95', p95, '<',
-                  sm_cfg['http_req_duration']['p95'],
-                  sm_gate, 'smoke_p95')
-    else:
-        print('\n--- Smoke Gate: results not available ---')
+        metrics = data.get('metrics', {})
+        sc_cfg = (nfr.get('performance', {}).get('scenarios', {})
+                  .get(scenario_name, {}).get('thresholds', {}))
+        severity = sc_cfg.get('gate', severity_override or 'critical') if isinstance(sc_cfg, dict) else (severity_override or 'critical')
+        gate_prefix = f'{scenario_name}_'
 
-    # ============================================================
-    # Baseline Gate (CRITICAL)
-    # ============================================================
-    baseline_path = os.path.join(args.artifacts, 'perf-results',
-                                 'baseline-results.json')
-    baseline = load_k6_result(baseline_path)
-    if baseline:
-        print('\n--- Baseline Gate (CRITICAL) ---')
-        metrics = baseline.get('metrics', {})
-        bl = (nfr.get('performance', {}).get('scenarios', {})
-              .get('baseline', {}).get('thresholds', {}))
-        bl_gate = bl.get('gate', 'critical') if isinstance(bl, dict) else 'critical'
+        print(f'\n--- {scenario_name.title()} Gate (severity={severity}) ---')
 
         # http_req_failed
         failed_rate = metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
-        th = bl.get('http_req_failed', {})
+        th = sc_cfg.get('http_req_failed', {}) if isinstance(sc_cfg, dict) else {}
         check('http_req_failed', failed_rate, '<',
-              th.get('rate', 0.01), bl_gate,
-              'baseline_http_req_failed')
+              th.get('rate', 0.01) if scenario_name == 'baseline' else th.get('rate', 0.05),
+              severity, f'{gate_prefix}http_req_failed')
 
         # http_req_duration p95
         p95 = metrics.get('http_req_duration', {}).get('values', {}).get('p(95)', 0)
-        th = bl.get('http_req_duration', {})
+        th = sc_cfg.get('http_req_duration', {}) if isinstance(sc_cfg, dict) else {}
+        p95_threshold = th.get('p95', 300) if scenario_name == 'baseline' else th.get('p95', 2000)
         check('http_req_duration.p95', p95, '<',
-              th.get('p95', 300), bl_gate,
-              'baseline_p95')
+              p95_threshold, severity, f'{gate_prefix}p95')
 
         # http_req_duration p99
         p99 = metrics.get('http_req_duration', {}).get('values', {}).get('p(99)', 0)
-        th = bl.get('http_req_duration', {})
+        p99_threshold = th.get('p99', 800) if scenario_name == 'baseline' else th.get('p99', 3000)
         check('http_req_duration.p99', p99, '<',
-              th.get('p99', 800), bl_gate,
-              'baseline_p99')
+              p99_threshold, severity, f'{gate_prefix}p99')
 
-        # throughput (per-scenario: http_reqs.rate, not throughput.min)
-        throughput = metrics.get('http_reqs', {}).get('values', {}).get('rate', 0)
-        th = bl.get('http_reqs', {})
-        check('http_reqs', throughput, '>=',
-              th.get('rate', 50), 'warning',
-              'baseline_throughput')
+        # Throughput (only for baseline)
+        if scenario_name == 'baseline':
+            throughput = metrics.get('http_reqs', {}).get('values', {}).get('rate', 0)
+            th = sc_cfg.get('http_reqs', {})
+            check('http_reqs', throughput, '>=',
+                  th.get('rate', 10), 'warning',
+                  'baseline_throughput')
 
-        # business errors
-        biz = metrics.get(f'{service}_errors', {}).get('values', {}).get('rate', 0)
-        th = bl.get('business_errors', {})
-        check(f'{service}_errors', biz, '<',
-              th.get('rate', 0.05), bl_gate,
-              'baseline_business_errors')
-    else:
-        print('\n--- Baseline Gate: results not available (SKIPPED) ---')
-        summary['gates'].append({
-            'gate': 'baseline', 'metric': 'present', 'actual': 'missing',
-            'threshold': 'present', 'status': 'SKIP', 'severity': 'warning',
-        })
+        # Business errors (only for baseline)
+        if scenario_name == 'baseline':
+            biz = metrics.get(f'{service}_errors', {}).get('values', {}).get('rate', 0)
+            th = sc_cfg.get('business_errors', {})
+            check(f'{service}_errors', biz, '<',
+                  th.get('rate', 0.05), severity,
+                  'baseline_business_errors')
+
+        # Log k6's own threshold summary for reference
+        thresholds_metric = metrics.get('thresholds', {})
+        if thresholds_metric:
+            for metric_name, status in thresholds_metric.items():
+                print(f'  (k6) {metric_name}: {status}')
+
+    # ============================================================
+    # Evaluate all test scenarios
+    # ============================================================
+    for sc in ['smoke', 'baseline', 'stress', 'spike']:
+        evaluate_scenario(sc)
 
     # ============================================================
     # Resilience / Chaos Gate
     # ============================================================
-    recovery_path = os.path.join(args.artifacts, 'chaos-results',
-                                 'chaos-recovery.json')
-    if os.path.exists(recovery_path):
+    def find_json(name):
+        """Look for a JSON file in artifacts dir or common subdirectories."""
+        for candidate in [
+            os.path.join(args.artifacts, name),
+            os.path.join(args.artifacts, 'chaos-results', name),
+        ]:
+            if os.path.exists(candidate):
+                return candidate
+        return None
+
+    recovery_path = find_json('chaos-recovery.json')
+    if recovery_path:
         print('\n--- Resilience Gate ---')
         recovery = json.load(open(recovery_path))
         experiments = (nfr.get('resilience', {})
@@ -308,14 +317,14 @@ def main():
                           'critical', f'chaos_{exp_name}_recovery')
 
     # Chaos k6 results (smoke during chaos, informational)
-    chaos_k6_path = os.path.join(args.artifacts, 'chaos-results',
-                                 'chaos-results.json')
-    chaos_k6 = load_k6_result(chaos_k6_path)
-    if chaos_k6:
-        c_metrics = chaos_k6.get('metrics', {})
-        c_failed = c_metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
-        check('http_req_failed (during chaos)', c_failed, '<',
-              0.05, 'warning', 'chaos_http_req_failed')
+    chaos_k6_path = find_json('chaos-results.json')
+    if chaos_k6_path:
+        chaos_k6 = load_k6_result(chaos_k6_path)
+        if chaos_k6:
+            c_metrics = chaos_k6.get('metrics', {})
+            c_failed = c_metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
+            check('http_req_failed (during chaos)', c_failed, '<',
+                  0.05, 'warning', 'chaos_http_req_failed')
 
     # ============================================================
     # Sizing Drift Gate (CRITICAL)

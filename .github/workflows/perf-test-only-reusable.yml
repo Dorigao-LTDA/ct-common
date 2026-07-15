@@ -63,6 +63,18 @@ jobs:
           python3 /tmp/ct-common/scripts/nfr-to-env.py --nfr nfr.yaml --output nfr-env.sh --service ${{ env.SERVICE_NAME }}
           sed 's/^export //' nfr-env.sh > /tmp/k6-env.txt
 
+      - name: Run k6 Smoke
+        env:
+          BASE_URL: http://localhost:8080
+        run: |
+          docker run --rm --network host \
+            --user "$(id -u):$(id -g)" \
+            -v ${{ github.workspace }}:/workspace \
+            -w /workspace \
+            -e BASE_URL \
+            --env-file /tmp/k6-env.txt \
+            grafana/k6 run perf/smoke.js --out json=smoke-results.json --tag test_type=smoke
+
       - name: Run k6 Baseline
         env:
           BASE_URL: http://localhost:8080
@@ -108,6 +120,7 @@ jobs:
         with:
           name: perf-results
           path: |
+            smoke-results.json
             baseline-results.json
             stress-results.json
             spike-results.json
