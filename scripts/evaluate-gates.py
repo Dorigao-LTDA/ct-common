@@ -22,14 +22,38 @@ def parse_yaml(path):
 
 
 def load_k6_result(path):
-    """k6 outputs newline-delimited JSON; metrics are in the last line."""
+    """
+    Parse k6 --out json output (NDJSON) into a single metrics dict.
+
+    k6 outputs one JSON line per event.  Metric-type events carry aggregate
+    values (rate, p(95), avg, count, …).  This function reads every line,
+    collects all Metric events, and merges them into the structure the rest
+    of the script expects: {metrics: {<name>: {values: {...}}}}.
+    Returns None when the file is missing, empty, or contains no Metric events.
+    """
     if not os.path.exists(path):
         return None
+
+    metrics = {}
     with open(path) as f:
-        lines = f.readlines()
-    if not lines:
-        return None
-    return json.loads(lines[-1].strip())
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get('type') != 'Metric':
+                continue
+            name = event.get('metric')
+            values = event.get('data', {}).get('values')
+            if name and values:
+                if name not in metrics:
+                    metrics[name] = {'values': {}}
+                metrics[name]['values'].update(values)
+
+    return {'metrics': metrics} if metrics else None
 
 
 # --- Kubernetes resource quantity parsing (stdlib only) ---
