@@ -7,26 +7,16 @@ on:
         description: 'Nome do microserviço (catalogo, pagamento, pedido)'
         required: true
         type: string
-      run_pod_kill:
-        description: 'Executar experimento PodKill?'
+      chaos_experiments_filter:
+        description: 'Filtrar experimentos por nome (vírgula separado; vazio = todos do nfr.yaml)'
         required: false
-        type: boolean
-        default: true
-      run_network_delay:
-        description: 'Executar experimento NetworkDelay?'
-        required: false
-        type: boolean
-        default: true
-      run_cpu_stress:
-        description: 'Executar experimento CPUStress?'
-        required: false
-        type: boolean
-        default: false
+        type: string
+        default: ''
       chaos_duration_seconds:
-        description: 'Duração em segundos para cada experimento com scheduler'
+        description: 'Duração em segundos para cada experimento'
         required: false
         type: number
-        default: 60
+        default: 120
 
 permissions:
   id-token: write
@@ -77,11 +67,18 @@ jobs:
           kubectl get pods -n chaos-mesh --no-headers 2>/dev/null | head -5 || \
             echo "No Chaos Mesh pods found - experiments may fail"
 
+      - name: Generate Chaos manifests from NFR
+        run: |
+          python3 /tmp/ct-common/scripts/nfr-to-chaos.py \
+            --nfr nfr.yaml \
+            --service ${{ env.SERVICE_NAME }} \
+            --output-dir chaos-generated
+          echo "Generated manifests:"
+          ls -la chaos-generated/
+
       # ---------------------------------------------------------------
       # Helper: run one chaos experiment with k6 monitoring + recovery
       # ---------------------------------------------------------------
-      # This step creates a script that wraps the chaos + recovery + k6
-      # logic so each experiment can reuse it without duplicating steps.
       - name: Write chaos runner script
         shell: bash
         run: |
@@ -98,7 +95,7 @@ jobs:
           # 5. Waits for pod recovery (polls until Ready)
           # 6. Records recovery_time_seconds
           # 7. Cleans up (deletes the manifest)
-          # Writes: {chaos-results/<exp_name>.json, chaos-recovery.json entries}
+          # Writes: /tmp/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
           #
           MANIFEST="$1"
           EXP_NAME="$2"
@@ -133,8 +130,7 @@ jobs:
           echo "=== Waiting ${DURATION}s for chaos ${EXP_NAME} ==="
           sleep "${DURATION}"
 
-          # If the manifest uses a scheduler, Chaos Mesh handles duration automatically.
-          # We just wait the specified duration, then stop k6.
+          # Stop k6
           echo "=== Stopping k6 for ${EXP_NAME} ==="
           kill "${K6_PID}" 2>/dev/null || true
           wait "${K6_PID}" 2>/dev/null || true
@@ -169,7 +165,7 @@ jobs:
             sleep 2
           done
 
-          # Cleanup chaos
+          # Cleanup chaos immediately so the next experiment starts clean
           echo "=== Cleaning up ${EXP_NAME} ==="
           kubectl delete -f "${MANIFEST}" --ignore-not-found --wait=true 2>/dev/null || true
 
@@ -196,7 +192,7 @@ jobs:
           exit 1
 
       # =============================================================
-      # Experiment: k6 Baseline (before any chaos)
+      # Baseline k6 before any chaos
       # =============================================================
       - name: Baseline k6 before chaos
         env:
@@ -213,49 +209,39 @@ jobs:
               --tag test_type=baseline_before_chaos
 
       # =============================================================
-      # Experiment 1: Pod Kill
+      # Dynamic chaos experiments — iterate over generated manifests
       # =============================================================
-      - name: Chaos — Pod Kill
-        if: ${{ inputs.run_pod_kill == true }}
+      - name: Run all chaos experiments
         env:
-          CHAOS_MANIFEST: chaos/pod-kill.yaml
-          CHAOS_EXP_NAME: pod-kill
+          FILTER: ${{ inputs.chaos_experiments_filter }}
         run: |
-          /tmp/run-chaos-experiment.sh \
-            "${{ env.CHAOS_MANIFEST }}" \
-            "${{ env.CHAOS_EXP_NAME }}" \
-            "${{ env.CHAOS_DURATION }}" \
-            "${{ env.SERVICE_NAME }}"
+          # Read manifest list and run each matching experiment
+          jq -c '.experiments[]' chaos-generated/manifest-list.json | while read exp; do
+            NAME=$(echo "$exp" | jq -r '.name')
+            FILE=$(echo "$exp" | jq -r '.file')
+            TYPE=$(echo "$exp" | jq -r '.type')
 
-      # =============================================================
-      # Experiment 2: Network Delay
-      # =============================================================
-      - name: Chaos — Network Delay
-        if: ${{ inputs.run_network_delay == true }}
-        env:
-          CHAOS_MANIFEST: chaos/network-delay.yaml
-          CHAOS_EXP_NAME: network-delay
-        run: |
-          /tmp/run-chaos-experiment.sh \
-            "${{ env.CHAOS_MANIFEST }}" \
-            "${{ env.CHAOS_EXP_NAME }}" \
-            "${{ env.CHAOS_DURATION }}" \
-            "${{ env.SERVICE_NAME }}"
+            # Apply filter if set (comma-separated list of experiment names)
+            if [ -n "$FILTER" ]; then
+              MATCH=0
+              IFS=',' read -ra PARTS <<< "$FILTER"
+              for f in "${PARTS[@]}"; do
+                f="$(echo "$f" | xargs)"  # trim whitespace
+                if [ "$NAME" = "$f" ]; then MATCH=1; break; fi
+              done
+              if [ "$MATCH" -eq 0 ]; then
+                echo "=== Skipping $NAME (not in filter) ==="
+                continue
+              fi
+            fi
 
-      # =============================================================
-      # Experiment 3: CPU Stress
-      # =============================================================
-      - name: Chaos — CPU Stress
-        if: ${{ inputs.run_cpu_stress == true }}
-        env:
-          CHAOS_MANIFEST: chaos/pod-cpu-stress.yaml
-          CHAOS_EXP_NAME: pod-cpu-stress
-        run: |
-          /tmp/run-chaos-experiment.sh \
-            "${{ env.CHAOS_MANIFEST }}" \
-            "${{ env.CHAOS_EXP_NAME }}" \
-            "${{ env.CHAOS_DURATION }}" \
-            "${{ env.SERVICE_NAME }}"
+            echo "=== Running chaos experiment: $NAME (type=$TYPE) ==="
+            /tmp/run-chaos-experiment.sh \
+              "$FILE" \
+              "$NAME" \
+              "${{ env.CHAOS_DURATION }}" \
+              "${{ env.SERVICE_NAME }}"
+          done
 
       # =============================================================
       # Consolidate results
@@ -277,6 +263,11 @@ jobs:
           echo "$RECOVERY_JSON" > /tmp/chaos-recovery.json
           echo "=== Recovery times ==="
           cat /tmp/chaos-recovery.json
+
+          # Merge per-experiment k6 NDJSON into one file
+          if ls /tmp/chaos-results/*.json 2>/dev/null; then
+            cat /tmp/chaos-results/*.json > chaos-results.json 2>/dev/null || true
+          fi
 
       - name: Upload chaos k6 results
         uses: actions/upload-artifact@v4
