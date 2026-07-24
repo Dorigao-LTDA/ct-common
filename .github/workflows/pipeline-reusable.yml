@@ -241,7 +241,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/smoke.js --out json=smoke-results.json
+            grafana/k6 run perf/smoke.js --summary-export=smoke-results.json
 
       - name: Upload Smoke Results
         uses: actions/upload-artifact@v4
@@ -304,7 +304,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/baseline.js --out json=baseline-results.json --tag test_type=baseline
+            grafana/k6 run perf/baseline.js --summary-export=baseline-results.json --tag test_type=baseline
 
       - name: Run k6 Stress
         if: ${{ inputs.run_stress_spike_tests == true }}
@@ -318,7 +318,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/stress.js --out json=stress-results.json --tag test_type=stress
+            grafana/k6 run perf/stress.js --summary-export=stress-results.json --tag test_type=stress
 
       - name: Run k6 Spike
         if: ${{ inputs.run_stress_spike_tests == true }}
@@ -332,7 +332,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/spike.js --out json=spike-results.json --tag test_type=spike
+            grafana/k6 run perf/spike.js --summary-export=spike-results.json --tag test_type=spike
 
       - name: Upload Performance Results
         uses: actions/upload-artifact@v4
@@ -421,7 +421,7 @@ jobs:
             --env-file /tmp/k6-env.txt \
             --name "k6-${EXP_NAME}" \
             grafana/k6 run perf/smoke.js \
-              --out json=/tmp/chaos-results/${EXP_NAME}.json \
+              --summary-export=/tmp/chaos-results/${EXP_NAME}.json \
               --tag test_type=chaos \
               --tag chaos_experiment=${EXP_NAME} &
           K6_PID=$!
@@ -535,9 +535,11 @@ jobs:
           echo "=== Recovery times ==="
           cat chaos-recovery.json
 
-          # Merge per-experiment k6 NDJSON into one file
+          # Merge per-experiment k6 summary exports into one NDJSON file
           if ls /tmp/chaos-results/*.json 2>/dev/null; then
-            cat /tmp/chaos-results/*.json > chaos-results.json 2>/dev/null || true
+            for f in /tmp/chaos-results/*.json; do
+              [ -s "$f" ] && jq -c '.metrics | to_entries[] | {type: "Metric", metric: .key, data: {values: .value.values}}' "$f"
+            done > chaos-results.json 2>/dev/null || true
           fi
 
       - name: Cleanup Chaos

@@ -23,35 +23,55 @@ def parse_yaml(path):
 
 def load_k6_result(path):
     """
-    Parse k6 --out json output (NDJSON) into a single metrics dict.
+    Parse k6 output into a single metrics dict.
 
-    k6 outputs one JSON line per event.  Metric-type events carry aggregate
-    values (rate, p(95), avg, count, …).  This function reads every line,
-    collects all Metric events, and merges them into the structure the rest
-    of the script expects: {metrics: {<name>: {values: {...}}}}.
-    Returns None when the file is missing, empty, or contains no Metric events.
+    Accepts two formats:
+      1. k6 --summary-export output (single JSON object with "metrics" key).
+      2. k6 --out json output (NDJSON, one JSON line per event).
+
+    Returns {metrics: {<name>: {values: {...}}}} or None when the file is
+    missing, empty, or contains no parsable metrics.
     """
     if not os.path.exists(path):
         return None
 
-    metrics = {}
     with open(path) as f:
-        for line in f:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                event = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if event.get('type') != 'Metric':
-                continue
-            name = event.get('metric')
-            values = event.get('data', {}).get('values')
-            if name and values:
-                if name not in metrics:
-                    metrics[name] = {'values': {}}
-                metrics[name]['values'].update(values)
+        content = f.read().strip()
+
+    if not content:
+        return None
+
+    # --- Try --summary-export format first (single JSON) ---
+    try:
+        data = json.loads(content)
+        if isinstance(data, dict) and 'metrics' in data:
+            result = {}
+            for name, metric_data in data['metrics'].items():
+                if isinstance(metric_data, dict) and 'values' in metric_data:
+                    result[name] = {'values': metric_data['values']}
+            if result:
+                return {'metrics': result}
+    except json.JSONDecodeError:
+        pass
+
+    # --- Fallback: NDJSON format (--out json) ---
+    metrics = {}
+    for line in content.split('\n'):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if event.get('type') != 'Metric':
+            continue
+        name = event.get('metric')
+        values = event.get('data', {}).get('values')
+        if name and values:
+            if name not in metrics:
+                metrics[name] = {'values': {}}
+            metrics[name]['values'].update(values)
 
     return {'metrics': metrics} if metrics else None
 

@@ -73,7 +73,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/smoke.js --out json=smoke-results.json --tag test_type=smoke
+            grafana/k6 run perf/smoke.js --summary-export=smoke-results.json --tag test_type=smoke
 
       - name: Run k6 Baseline
         env:
@@ -85,7 +85,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/baseline.js --out json=baseline-results.json --tag test_type=baseline
+            grafana/k6 run perf/baseline.js --summary-export=baseline-results.json --tag test_type=baseline
 
       - name: Run k6 Stress
         if: ${{ inputs.run_stress_spike_tests == true }}
@@ -99,7 +99,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/stress.js --out json=stress-results.json --tag test_type=stress
+            grafana/k6 run perf/stress.js --summary-export=stress-results.json --tag test_type=stress
 
       - name: Run k6 Spike
         if: ${{ inputs.run_stress_spike_tests == true }}
@@ -113,7 +113,7 @@ jobs:
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/spike.js --out json=spike-results.json --tag test_type=spike
+            grafana/k6 run perf/spike.js --summary-export=spike-results.json --tag test_type=spike
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
