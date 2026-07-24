@@ -178,12 +178,17 @@ jobs:
 
       - name: Port-forward to AKS (persistent)
         run: |
-          kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 &
+          (
+            while true; do
+              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
+              sleep 1
+            done
+          ) &
           PF_PID=$!
+          echo "$PF_PID" > /tmp/pf-pid.txt
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/health; then
               echo "Tunnel ready after ${i} attempts"
-              echo "$PF_PID" > /tmp/pf-pid.txt
               exit 0
             fi
             sleep 2

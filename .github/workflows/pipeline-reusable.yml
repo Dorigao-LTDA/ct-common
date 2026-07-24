@@ -214,7 +214,12 @@ jobs:
 
       - name: Port-forward to AKS
         run: |
-          kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 &
+          (
+            while true; do
+              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
+              sleep 1
+            done
+          ) &
           PF_PID=$!
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/health; then
@@ -277,7 +282,12 @@ jobs:
 
       - name: Port-forward to AKS
         run: |
-          kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 &
+          (
+            while true; do
+              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
+              sleep 1
+            done
+          ) &
           PF_PID=$!
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/health; then
@@ -484,12 +494,17 @@ jobs:
 
       - name: Port-forward to AKS (persistent)
         run: |
-          kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 &
+          (
+            while true; do
+              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
+              sleep 1
+            done
+          ) &
           PF_PID=$!
+          echo "$PF_PID" > /tmp/pf-pid.txt
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/health; then
               echo "Tunnel ready after ${i} attempts"
-              echo "$PF_PID" > /tmp/pf-pid.txt
               exit 0
             fi
             sleep 2
@@ -594,3 +609,124 @@ jobs:
         with:
           name: gate-summary
           path: gate-summary.json
+
+  # =============================================
+  # Stage 8: LLM Insights & Developer Report
+  # =============================================
+  insights-report:
+    name: Insights & Developer Report
+    needs: [smoke-test, performance-test, resilience-test, gate-evaluation]
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone shared toolkit
+        run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-common.git /tmp/ct-common
+
+      - name: Clone insights tools
+        run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-insights.git /tmp/ct-insights
+
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Analyze code changes
+        run: |
+          BASE=$(git merge-base HEAD~1 HEAD 2>/dev/null || echo "HEAD~1")
+          python3 /tmp/ct-insights/scripts/insights/code-analyze.py \
+            --repo-path . \
+            --base-ref "$BASE" \
+            --service ${{ env.SERVICE_NAME }} \
+            --output insights-input-code.json
+
+      - name: Azure Login + Set AKS Context
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Collect observability data
+        id: o11y
+        continue-on-error: true
+        run: |
+          kubectl port-forward -n observability svc/mimir-gateway 9090:8080 &
+          kubectl port-forward -n observability svc/loki 3100:3100 &
+          kubectl port-forward -n observability svc/tempo 3200:3100 &
+          sleep 5
+          python3 /tmp/ct-insights/scripts/insights/o11y-collect.py \
+            --mimir-url http://localhost:9090/prometheus \
+            --loki-url http://localhost:3100 \
+            --tempo-url http://localhost:3200 \
+            --service ${{ env.SERVICE_NAME }} \
+            --test-window "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)/$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --output insights-input-o11y.json
+          kill %1 %2 %3 2>/dev/null || true
+
+      - name: Collect test data
+        run: |
+          python3 /tmp/ct-insights/scripts/insights/collect.py \
+            --artifacts-dir . \
+            --nfr nfr.yaml \
+            --service ${{ env.SERVICE_NAME }} \
+            --commit ${{ github.sha }} \
+            --o11y-input insights-input-o11y.json \
+            --code-input insights-input-code.json \
+            --output insights-input.json
+
+      - name: Analyze with LLM
+        env:
+          LLM_PROVIDER: azure_openai
+          LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
+          LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o-mini' }}
+        run: |
+          python3 /tmp/ct-insights/scripts/insights/analyze.py \
+            --input insights-input.json \
+            --output insights-llm-response.json
+
+      - name: Generate report
+        if: always()
+        run: |
+          python3 /tmp/ct-insights/scripts/insights/report.py \
+            --test-data insights-input.json \
+            --llm-response insights-llm-response.json \
+            --output insights-report.md
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: insights-report-${{ env.SERVICE_NAME }}
+          path: |
+            insights-report.md
+            insights-report.json
+            insights-input.json
+
+      - name: Post report as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('insights-report.md', 'utf8');
+            const truncated = report.length > 60000
+              ? report.substring(0, 60000) + '\n\n> ... (truncated — full report in artifacts)'
+              : report;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: truncated
+            });

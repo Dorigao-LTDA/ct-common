@@ -46,7 +46,12 @@ jobs:
 
       - name: Port-forward to AKS
         run: |
-          kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 &
+          (
+            while true; do
+              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
+              sleep 1
+            done
+          ) &
           PF_PID=$!
           for i in $(seq 1 15); do
             if curl -sf http://localhost:8080/health; then
@@ -124,6 +129,19 @@ jobs:
             baseline-results.json
             stress-results.json
             spike-results.json
+
+      - name: Debug summary content
+        run: |
+          for f in smoke-results.json baseline-results.json stress-results.json spike-results.json; do
+            echo "=== $f ==="
+            if [ -f "$f" ]; then
+              wc -c < "$f"
+              head -c 2000 "$f"
+            else
+              echo "FILE NOT FOUND: $f"
+            fi
+            echo ""
+          done
 
       - name: Evaluate gates
         run: |
