@@ -630,16 +630,13 @@ jobs:
       - name: Clone shared toolkit
         run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-common.git /tmp/ct-common
 
-      - name: Clone insights tools
-        run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-insights.git /tmp/ct-insights
-
       - name: Download all test artifacts
         uses: actions/download-artifact@v4
 
       - name: Analyze code changes
         run: |
           BASE=$(git merge-base HEAD~1 HEAD 2>/dev/null || echo "HEAD~1")
-          python3 /tmp/ct-insights/scripts/insights/code-analyze.py \
+          python3 /tmp/ct-common/scripts/insights/code-analyze.py \
             --repo-path . \
             --base-ref "$BASE" \
             --service ${{ env.SERVICE_NAME }} \
@@ -666,7 +663,7 @@ jobs:
           kubectl port-forward -n observability svc/loki 3100:3100 &
           kubectl port-forward -n observability svc/tempo 3200:3100 &
           sleep 5
-          python3 /tmp/ct-insights/scripts/insights/o11y-collect.py \
+          python3 /tmp/ct-common/scripts/insights/o11y-collect.py \
             --mimir-url http://localhost:9090/prometheus \
             --loki-url http://localhost:3100 \
             --tempo-url http://localhost:3200 \
@@ -677,7 +674,7 @@ jobs:
 
       - name: Collect test data
         run: |
-          python3 /tmp/ct-insights/scripts/insights/collect.py \
+          python3 /tmp/ct-common/scripts/insights/collect.py \
             --artifacts-dir . \
             --nfr nfr.yaml \
             --service ${{ env.SERVICE_NAME }} \
@@ -692,14 +689,14 @@ jobs:
           LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
           LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o-mini' }}
         run: |
-          python3 /tmp/ct-insights/scripts/insights/analyze.py \
+          python3 /tmp/ct-common/scripts/insights/analyze.py \
             --input insights-input.json \
             --output insights-llm-response.json
 
       - name: Generate report
         if: always()
         run: |
-          python3 /tmp/ct-insights/scripts/insights/report.py \
+          python3 /tmp/ct-common/scripts/insights/report.py \
             --test-data insights-input.json \
             --llm-response insights-llm-response.json \
             --output insights-report.md
