@@ -17,6 +17,21 @@ on:
         required: false
         type: number
         default: 120
+      run_pod_kill:
+        description: 'DEPRECATED: use chaos_experiments_filter instead'
+        required: false
+        type: boolean
+        default: true
+      run_network_delay:
+        description: 'DEPRECATED: use chaos_experiments_filter instead'
+        required: false
+        type: boolean
+        default: true
+      run_cpu_stress:
+        description: 'DEPRECATED: use chaos_experiments_filter instead'
+        required: false
+        type: boolean
+        default: true
 
 permissions:
   id-token: write

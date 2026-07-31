@@ -1,13 +1,6 @@
 #!/usr/bin/env python3
 """
-Call an LLM provider with aggregated test + observability + code data.
-
-Provider-agnostic: works with Azure OpenAI, OpenAI, Anthropic, or any
-OpenAI-compatible chat completions endpoint.
-
-Auth modes:
-  1. Bearer token: set LLM_API_KEY, the script sends Authorization: Bearer
-  2. Azure API key: set LLM_API_KEY, set LLM_PROVIDER=azure (sends api-key header)
+Call an LLM provider using the OpenAI Python library via Azure AI Foundry.
 
 3 sequential calls:
   1. Performance Analyst — k6 metrics + thresholds + observability correlation
@@ -15,10 +8,9 @@ Auth modes:
   3. Synthesis — combines both + code changes into developer report
 
 Usage:
-  export LLM_ENDPOINT="https://.../chat/completions"
-  export LLM_MODEL="gpt-4o-mini"
-  export LLM_PROVIDER="azure_openai"
-  export LLM_API_KEY="..."  # or get via `az account get-access-token`
+  export LLM_ENDPOINT="https://dorigao-ltda-openai.services.ai.azure.com/openai/v1"
+  export LLM_DEPLOYMENT="DeepSeek-V4-Flash"
+  export LLM_API_KEY="..."    # or set via OIDC token in the pipeline
 
   python3 analyze.py --input insights-input.json --output insights-llm-response.json
 
@@ -32,11 +24,9 @@ import sys
 import time
 
 try:
-    import urllib.request as urlrequest
-    import urllib.error as urlerror
+    from openai import OpenAI
 except ImportError:
-    urlrequest = None
-    urlerror = None
+    OpenAI = None
 
 
 SYSTEM_PROMPT = """You are a Senior Site Reliability Engineer (SRE) specialized in distributed systems,
@@ -64,7 +54,7 @@ Your tasks, in priority order:
 3. If code changes are available, identify which modified endpoints or dependencies likely
    caused the performance change
 4. For each finding, provide a concrete, actionable recommendation with:
-   - Priority: critical (gate failure), warning (within 20%% of threshold), or info (optimization)
+   - Priority: critical (gate failure), warning (within 20% of threshold), or info (optimization)
    - Exact file path and config key to change (from nfr.yaml, deploy/values.yaml, or source code)
    - Suggested value with justification
    - If the change is in JVM args, Dockerfile, or pom.xml -- cite the exact parameter
@@ -83,50 +73,51 @@ hypothesis, recommendation
 Return ONLY the JSON object, no markdown fences, no extra text."""
 
 
-def call_llm(messages, endpoint, api_key, model, provider='openai', timeout=60):
+def call_llm(messages, base_url, api_key, deployment, timeout=60):
     """
-    Make one LLM chat completion call.
+    Make one LLM chat completion call via OpenAI-compatible API (Azure AI Foundry).
     Returns parsed JSON response dict or dict with 'error' key.
     """
-    if urlrequest is None:
-        return {'error': 'stdlib urllib not available'}
+    if OpenAI is None:
+        return {'error': 'openai library not installed. Run: pip install openai'}
 
-    headers = {'Content-Type': 'application/json'}
-    if provider == 'azure_openai':
-        headers['api-key'] = api_key
-    elif api_key:
-        headers['Authorization'] = f'Bearer {api_key}'
-
-    body = json.dumps({
-        'model': model,
-        'messages': messages,
-        'temperature': 0.1,
-        'max_tokens': 2000,
-        'response_format': {'type': 'json_object'},
-    }).encode()
+    if not api_key:
+        return {'error': 'no API key or token provided'}
 
     try:
-        req = urlrequest.Request(endpoint, data=body, headers=headers, method='POST')
-        with urlrequest.urlopen(req, timeout=timeout) as resp:
-            result = json.loads(resp.read())
-        # Extract content from standard response format
-        choices = result.get('choices', [])
-        if not choices:
-            return {'error': 'empty response', 'raw': result}
-        content = choices[0].get('message', {}).get('content', '')
-        if not content:
-            return {'error': 'empty message content', 'raw': result}
-        # Parse the JSON string inside content
-        try:
-            return json.loads(content)
-        except json.JSONDecodeError:
-            return {'error': 'LLM output not valid JSON', 'raw': content}
-    except urlerror.HTTPError as e:
-        return {'error': f'HTTP {e.code}: {e.reason}'}
-    except urlerror.URLError as e:
-        return {'error': f'Connection: {e.reason}'}
-    except (OSError, json.JSONDecodeError) as e:
-        return {'error': str(e)}
+        client = OpenAI(
+            base_url=base_url,
+            api_key=api_key,
+            timeout=timeout,
+            max_retries=0,
+        )
+    except Exception as e:
+        return {'error': f'failed to create OpenAI client: {e}'}
+
+    try:
+        completion = client.chat.completions.create(
+            model=deployment,
+            messages=messages,
+            temperature=0.1,
+            max_tokens=2000,
+            response_format={'type': 'json_object'},
+            timeout=timeout,
+        )
+    except Exception as e:
+        return {'error': f'API call failed: {e}'}
+
+    choices = completion.choices
+    if not choices:
+        return {'error': 'empty response choices'}
+
+    content = choices[0].message.content
+    if not content:
+        return {'error': 'empty message content'}
+
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as e:
+        return {'error': f'LLM output not valid JSON: {e}', 'raw': content[:1000]}
 
 
 def build_prompts(data, role, instructions):
@@ -142,7 +133,7 @@ def build_prompts(data, role, instructions):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Run LLM analysis on test data'
+        description='Run LLM analysis on test data (OpenAI library)'
     )
     parser.add_argument('--input', required=True,
                         help='insights-input.json from collect.py')
@@ -171,20 +162,30 @@ def main():
         return
 
     # Read env
-    endpoint = os.environ.get('LLM_ENDPOINT', '')
+    base_url = os.environ.get('LLM_ENDPOINT', '')
     api_key = os.environ.get('LLM_API_KEY', '')
-    model = os.environ.get('LLM_MODEL', 'gpt-4o-mini')
-    provider = os.environ.get('LLM_PROVIDER', 'openai')
+    deployment = os.environ.get('LLM_DEPLOYMENT', 'DeepSeek-V4-Flash')
 
-    if not endpoint:
+    if not base_url:
         fallback = {
-            'error': 'LLM_ENDPOINT not set. Set env vars LLM_ENDPOINT, LLM_API_KEY, LLM_MODEL, LLM_PROVIDER',
+            'error': 'LLM_ENDPOINT not set. Set LLM_ENDPOINT, LLM_API_KEY, and LLM_DEPLOYMENT',
             'findings': [],
             'executive_summary': 'LLM analysis unavailable — LLM endpoint not configured.',
         }
         with open(args.output, 'w') as f:
             json.dump(fallback, f, indent=2)
         print('analyze: LLM_ENDPOINT not set, wrote fallback', file=sys.stderr)
+        return
+
+    if not api_key:
+        fallback = {
+            'error': 'LLM_API_KEY not set. Provide via OIDC token or secrets.LLM_API_KEY',
+            'findings': [],
+            'executive_summary': 'LLM analysis unavailable — no authentication token.',
+        }
+        with open(args.output, 'w') as f:
+            json.dump(fallback, f, indent=2)
+        print('analyze: LLM_API_KEY not set, wrote fallback', file=sys.stderr)
         return
 
     # ---- Call 1: Performance Analyst ----
@@ -195,7 +196,7 @@ def main():
         '(c) concrete recommendations with file paths and values.'
     )
     perf_messages = build_prompts(data, 'Performance Analyst', perf_prompt)
-    perf_result = call_llm(perf_messages, endpoint, api_key, model, provider, args.timeout)
+    perf_result = call_llm(perf_messages, base_url, api_key, deployment, args.timeout)
 
     # ---- Call 2: Resilience Analyst ----
     resil_prompt = (
@@ -205,10 +206,9 @@ def main():
         '(c) recommendations to improve recovery time or resilience configuration.'
     )
     resil_messages = build_prompts(data, 'Resilience Analyst', resil_prompt)
-    resil_result = call_llm(resil_messages, endpoint, api_key, model, provider, args.timeout)
+    resil_result = call_llm(resil_messages, base_url, api_key, deployment, args.timeout)
 
     # ---- Call 3: Synthesis (Tech Lead) ----
-    # Include outputs from calls 1 & 2 as context
     synthesis_context = {
         'performance_analysis': perf_result,
         'resilience_analysis': resil_result,
@@ -227,7 +227,7 @@ def main():
         {'role': 'user', 'content': synth_prompt},
         {'role': 'user', 'content': json.dumps(synthesis_context, indent=2)[:6000]},
     ]
-    synth_result = call_llm(synth_messages, endpoint, api_key, model, provider, args.timeout)
+    synth_result = call_llm(synth_messages, base_url, api_key, deployment, args.timeout)
 
     # ---- Assemble final output ----
     result = {
@@ -243,7 +243,6 @@ def main():
         if 'error' in res:
             result['errors'][name] = res['error']
 
-    # If all calls failed, set executive_summary fallback
     if not result['executive_summary'] and not result['findings']:
         result['executive_summary'] = 'LLM analysis unavailable — all API calls failed or returned empty.'
 

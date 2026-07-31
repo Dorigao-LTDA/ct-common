@@ -685,10 +685,23 @@ jobs:
 
       - name: Analyze with LLM
         env:
-          LLM_PROVIDER: azure_openai
           LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
-          LLM_MODEL: ${{ vars.LLM_MODEL || 'gpt-4o-mini' }}
+          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
         run: |
+          pip install -q openai 2>/dev/null || pip install openai
+          # Prefer OIDC token; fall back to secrets.LLM_API_KEY if set
+          OIDC_TOKEN=$(az account get-access-token \
+            --resource https://cognitiveservices.azure.com \
+            --query accessToken -o tsv 2>/dev/null || echo "")
+          if [ -n "$OIDC_TOKEN" ]; then
+            export LLM_API_KEY="$OIDC_TOKEN"
+            echo "Using OIDC token for LLM auth"
+          elif [ -n "$LLM_API_KEY" ]; then
+            echo "Using secrets.LLM_API_KEY for LLM auth"
+          else
+            echo "WARNING: No LLM auth token available. Report will be partial."
+          fi
           python3 /tmp/ct-common/scripts/insights/analyze.py \
             --input insights-input.json \
             --output insights-llm-response.json
