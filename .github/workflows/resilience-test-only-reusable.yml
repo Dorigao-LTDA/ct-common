@@ -73,11 +73,17 @@ jobs:
 
       - name: Ensure Chaos Mesh is installed
         run: |
-          if kubectl get namespace chaos-mesh &>/dev/null; then
-            echo "Chaos Mesh namespace found"
+          if kubectl get crd podchaos.chaos-mesh.org &>/dev/null; then
+            echo "Chaos Mesh CRDs found"
           else
-            echo "WARNING: chaos-mesh namespace not found. Installing..."
-            kubectl create namespace chaos-mesh 2>/dev/null || true
+            echo "Chaos Mesh not installed. Installing via Helm..."
+            helm repo add chaos-mesh https://charts.chaos-mesh.org
+            helm repo update
+            helm upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
+              --namespace chaos-mesh --create-namespace \
+              --set createCustomResource=true \
+              --version ${{ vars.CHAOS_MESH_CHART_VERSION || '2.6.3' }} \
+              --wait --timeout 5m
           fi
           kubectl get pods -n chaos-mesh --no-headers 2>/dev/null | head -5 || \
             echo "No Chaos Mesh pods found - experiments may fail"

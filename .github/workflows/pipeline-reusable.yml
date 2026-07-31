@@ -385,6 +385,23 @@ jobs:
           python3 /tmp/ct-common/scripts/nfr-to-env.py --nfr nfr.yaml --output nfr-env.sh --service ${{ env.SERVICE_NAME }}
           sed 's/^export //' nfr-env.sh > /tmp/k6-env.txt
 
+      - name: Ensure Chaos Mesh is installed
+        run: |
+          if kubectl get crd podchaos.chaos-mesh.org &>/dev/null; then
+            echo "Chaos Mesh CRDs found"
+          else
+            echo "Chaos Mesh not installed. Installing via Helm..."
+            helm repo add chaos-mesh https://charts.chaos-mesh.org
+            helm repo update
+            helm upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
+              --namespace chaos-mesh --create-namespace \
+              --set createCustomResource=true \
+              --version ${{ vars.CHAOS_MESH_CHART_VERSION || '2.6.3' }} \
+              --wait --timeout 5m
+          fi
+          kubectl get pods -n chaos-mesh --no-headers 2>/dev/null | head -5 || \
+            echo "No Chaos Mesh pods found - experiments may fail"
+
       - name: Generate Chaos manifests from NFR
         run: |
           python3 /tmp/ct-common/scripts/nfr-to-chaos.py \
