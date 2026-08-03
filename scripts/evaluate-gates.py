@@ -355,7 +355,17 @@ def main():
                     raw_threshold = raw_threshold[:-1]
                 actual_sec = (recovery.get(exp_name, {})
                               .get('recovery_time_seconds'))
-                if actual_sec is not None:
+                if actual_sec is None:
+                    # experiment not found in recovery JSON (never ran / artifact lost)
+                    check(f'chaos.{exp_name}.recovery_time',
+                          'missing', '>=', '0',
+                          'critical', f'chaos_{exp_name}_recovery')
+                elif actual_sec < 0:
+                    # negative recovery means experiment hung or timed out
+                    check(f'chaos.{exp_name}.recovery_time',
+                          'experiment hung/timeout', '>=', '0',
+                          'critical', f'chaos_{exp_name}_recovery')
+                else:
                     check(f'chaos.{exp_name}.recovery_time',
                           actual_sec, '<=', raw_threshold,
                           'critical', f'chaos_{exp_name}_recovery')

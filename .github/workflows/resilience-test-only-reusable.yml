@@ -107,16 +107,15 @@ jobs:
           #!/usr/bin/env bash
           set -euo pipefail
           #
-          # run-chaos-experiment <manifest> <experiment_name> <duration_seconds>
+          # run-chaos-experiment <manifest> <experiment_name> <duration_seconds> <service>
           #
-          # 1. Applies the chaos manifest
-          # 2. Starts k6 smoke in background (traffic generator)
-          # 3. Waits for chaos duration
-          # 4. Stops k6
-          # 5. Waits for pod recovery (polls until Ready)
-          # 6. Records recovery_time_seconds
-          # 7. Cleans up (deletes the manifest)
-          # Writes: /tmp/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
+          # 1. Starts k6 traffic generator (GET only via chaos-traffic.js)
+          # 2. Applies the chaos manifest
+          # 3. Starts health canary (curl /health every 1s) to measure real outage
+          # 4. Waits for chaos duration
+          # 5. Stops k6, waits for canary, computes recovery_time_seconds
+          # 6. Cleans up (--wait=false, no hang on stresschaos finalizers)
+          # Writes: <workspace>/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
           #
           MANIFEST="$1"
           EXP_NAME="$2"
@@ -125,16 +124,16 @@ jobs:
 
           mkdir -p /tmp/chaos-results
 
-          # Start k6 smoke in background as traffic generator
-          K6_START=$(date +%s%N)
+          # Start k6 traffic generator (GET only, no database writes)
           docker run --rm --network host \
             --user "$(id -u):$(id -g)" \
             -v "${{ github.workspace }}:/workspace" \
+            -v /tmp/chaos-results:/tmp/chaos-results \
             -w /workspace \
             -e BASE_URL=http://localhost:8080 \
             --env-file /tmp/k6-env.txt \
             --name "k6-${EXP_NAME}" \
-            grafana/k6 run perf/smoke.js \
+            grafana/k6 run perf/chaos-traffic.js \
               --summary-export=/tmp/chaos-results/${EXP_NAME}.json \
               --tag test_type=chaos \
               --tag chaos_experiment=${EXP_NAME} &
@@ -147,6 +146,34 @@ jobs:
           echo "=== Applying ${EXP_NAME} ==="
           kubectl apply -f "${MANIFEST}"
 
+          # Start health canary: polls /health every 1s, detects outage window
+          echo "=== Monitoring recovery for ${EXP_NAME} ==="
+          (
+            OUTAGE_START=0
+            OUTAGE_END=0
+            CANARY_MAX=$(( DURATION + 300 ))
+            for i in $(seq 1 ${CANARY_MAX}); do
+              if curl -sf --max-time 5 http://localhost:8080/health >/dev/null 2>&1; then
+                if [ "$OUTAGE_START" -ne 0 ] && [ "$OUTAGE_END" -eq 0 ]; then
+                  OUTAGE_END=$(date +%s)
+                  echo "=== Canary: recovered at t=$((i-1))s ==="
+                fi
+              else
+                if [ "$OUTAGE_START" -eq 0 ]; then
+                  OUTAGE_START=$(date +%s)
+                  echo "=== Canary: outage detected at t=$((i-1))s ==="
+                fi
+              fi
+              # Stop early if chaos duration elapsed AND we have already recovered
+              if [ "$i" -gt "$DURATION" ] && [ "$OUTAGE_END" -ne 0 ]; then
+                break
+              fi
+              sleep 1
+            done
+            echo "$OUTAGE_START $OUTAGE_END" > /tmp/canary-outage-${EXP_NAME}.txt
+          ) &
+          CANARY_PID=$!
+
           # Wait for chaos duration
           echo "=== Waiting ${DURATION}s for chaos ${EXP_NAME} ==="
           sleep "${DURATION}"
@@ -155,40 +182,22 @@ jobs:
           echo "=== Stopping k6 for ${EXP_NAME} ==="
           kill "${K6_PID}" 2>/dev/null || true
           wait "${K6_PID}" 2>/dev/null || true
-          K6_END=$(date +%s%N)
 
-          # Wait for all pods of this service to be Ready
-          echo "=== Waiting for recovery after ${EXP_NAME} ==="
-          RECOVERY_START=$(date +%s%N)
-          for i in $(seq 1 120); do
-            POD_STATUS=$(kubectl get pods -n app \
-              -l app="${SERVICE}" \
-              -o jsonpath='{.items[*].status.phase}' 2>/dev/null)
-            ALL_RUNNING=true
-            for status in $POD_STATUS; do
-              if [ "$status" != "Running" ]; then ALL_RUNNING=false; break; fi
-            done
-            if $ALL_RUNNING; then
-              ALL_READY=true
-              READY_STATUS=$(kubectl get pods -n app \
-                -l app="${SERVICE}" \
-                -o jsonpath='{.items[*].status.containerStatuses[*].ready}' 2>/dev/null)
-              for ready in $READY_STATUS; do
-                if [ "$ready" != "true" ]; then ALL_READY=false; break; fi
-              done
-              if $ALL_READY; then
-                RECOVERY_END=$(date +%s%N)
-                RECOVERY_SEC=$(( (RECOVERY_END - RECOVERY_START) / 1000000000 ))
-                echo "Recovery complete in ${RECOVERY_SEC}s"
-                break
-              fi
+          # Wait for canary to finish and compute recovery
+          wait "${CANARY_PID}" 2>/dev/null || true
+          read -r OUTAGE_START OUTAGE_END < /tmp/canary-outage-${EXP_NAME}.txt 2>/dev/null || true
+          OUTAGE_START=${OUTAGE_START:-0}
+          OUTAGE_END=${OUTAGE_END:-0}
+          if [ "$OUTAGE_START" = "0" ]; then RECOVERY_SEC=0; else
+            if [ "$OUTAGE_END" = "0" ]; then RECOVERY_SEC=-1; else
+              RECOVERY_SEC=$(( OUTAGE_END - OUTAGE_START ))
             fi
-            sleep 2
-          done
+          fi
+          echo "Recovery time: ${RECOVERY_SEC}s"
 
           # Cleanup chaos immediately so the next experiment starts clean
           echo "=== Cleaning up ${EXP_NAME} ==="
-          kubectl delete -f "${MANIFEST}" --ignore-not-found --wait=true 2>/dev/null || true
+          kubectl delete -f "${MANIFEST}" --ignore-not-found --wait=false 2>/dev/null || true
 
           # Write recovery time
           RECOVERY_SEC=${RECOVERY_SEC:--1}
@@ -227,6 +236,7 @@ jobs:
           docker run --rm --network host \
             --user "$(id -u):$(id -g)" \
             -v ${{ github.workspace }}:/workspace \
+            -v /tmp/chaos-results:/tmp/chaos-results \
             -w /workspace \
             -e BASE_URL \
             --env-file /tmp/k6-env.txt \
@@ -262,11 +272,21 @@ jobs:
             fi
 
             echo "=== Running chaos experiment: $NAME (type=$TYPE) ==="
-            /tmp/run-chaos-experiment.sh \
+            if timeout $(( CHAOS_DURATION + 420 )) /tmp/run-chaos-experiment.sh \
               "$FILE" \
               "$NAME" \
               "${{ env.CHAOS_DURATION }}" \
-              "${{ env.SERVICE_NAME }}"
+              "${{ env.SERVICE_NAME }}"; then
+              :  # experiment completed within timeout
+            else
+              RC=$?
+              if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+                echo "=== TIMEOUT: experiment $NAME hung — recording failure ==="
+                echo "${NAME}: -1s" >> /tmp/chaos-recovery-times.txt
+              else
+                echo "=== WARNING: experiment $NAME exited with code $RC ==="
+              fi
+            fi
           done
 
       # =============================================================
@@ -295,6 +315,21 @@ jobs:
             for f in /tmp/chaos-results/*.json; do
               [ -s "$f" ] && jq -c '.metrics | to_entries[] | {type: "Metric", metric: .key, data: {values: .value.values}}' "$f"
             done > chaos-results.json 2>/dev/null || true
+          fi
+
+          # Network-delay observation: compare chaos p95 vs baseline p95.
+          # If NetworkChaos added < 10ms to p95, warn (port-forward bypasses overlay).
+          if [ -f baseline-before-chaos.json ] && ls /tmp/chaos-results/network-delay.json 2>/dev/null; then
+            BL_P95=$(jq -r '.metrics.http_req_duration.values | ."p(95)" // 0' baseline-before-chaos.json 2>/dev/null || echo 0)
+            ND_P95=$(jq -r '.metrics.http_req_duration.values | ."p(95)" // 0' /tmp/chaos-results/network-delay.json 2>/dev/null || echo 0)
+            DIFF=$(( ND_P95 - BL_P95 ))
+            if [ "$DIFF" -lt 10 ] 2>/dev/null; then
+              echo "=== WARNING: network-delay experiment had no observable effect (p95 diff=${DIFF}ms)."
+              echo "=== Port-forward traffic bypasses the Service overlay; delay injection may be invisible."
+              echo "=== Consider running k6 as an in-cluster Job for accurate latency injection."
+            else
+              echo "=== OK: network-delay added ${DIFF}ms to p95."
+            fi
           fi
 
       - name: Upload chaos k6 results
