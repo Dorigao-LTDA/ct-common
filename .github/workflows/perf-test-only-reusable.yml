@@ -51,7 +51,7 @@ jobs:
 
       - name: Run k6 Smoke
         run: |
-          /tmp/ct-common/scripts/k6-job-runner.sh \
+          bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/smoke.js \
             ${{ env.SERVICE_NAME }} \
             smoke-results.json \
@@ -60,7 +60,7 @@ jobs:
 
       - name: Run k6 Baseline
         run: |
-          /tmp/ct-common/scripts/k6-job-runner.sh \
+          bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/baseline.js \
             ${{ env.SERVICE_NAME }} \
             baseline-results.json \
@@ -71,7 +71,7 @@ jobs:
         if: ${{ inputs.run_stress_spike_tests == true }}
         continue-on-error: true
         run: |
-          /tmp/ct-common/scripts/k6-job-runner.sh \
+          bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/stress.js \
             ${{ env.SERVICE_NAME }} \
             stress-results.json \
@@ -82,7 +82,7 @@ jobs:
         if: ${{ inputs.run_stress_spike_tests == true }}
         continue-on-error: true
         run: |
-          /tmp/ct-common/scripts/k6-job-runner.sh \
+          bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/spike.js \
             ${{ env.SERVICE_NAME }} \
             spike-results.json \

@@ -285,7 +285,7 @@ jobs:
       # =============================================================
       - name: Baseline k6 before chaos
         run: |
-          /tmp/ct-common/scripts/k6-job-runner.sh \
+          bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/smoke.js \
             ${{ env.SERVICE_NAME }} \
             baseline-before-chaos.json \
