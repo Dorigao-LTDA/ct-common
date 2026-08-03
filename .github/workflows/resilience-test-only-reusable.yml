@@ -98,7 +98,7 @@ jobs:
           ls -la chaos-generated/
 
       # ---------------------------------------------------------------
-      # Helper: run one chaos experiment with k6 monitoring + recovery
+      # Helper: run one chaos experiment with in-cluster k6 + canary recovery
       # ---------------------------------------------------------------
       - name: Write chaos runner script
         shell: bash
@@ -109,44 +109,81 @@ jobs:
           #
           # run-chaos-experiment <manifest> <experiment_name> <duration_seconds> <service>
           #
-          # 1. Starts k6 traffic generator (GET only via chaos-traffic.js)
-          # 2. Applies the chaos manifest
-          # 3. Starts health canary (curl /health every 1s) to measure real outage
+          # 1. Starts k6 Job in-cluster (chaos-traffic.js, GET only)
+          # 2. Applies chaos manifest
+          # 3. Runs health canary (curl /health via port-forward) to measure real outage
           # 4. Waits for chaos duration
-          # 5. Stops k6, waits for canary, computes recovery_time_seconds
+          # 5. Waits for k6 Job to complete, extracts summary
           # 6. Cleans up (--wait=false, no hang on stresschaos finalizers)
-          # Writes: <workspace>/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
+          # Writes: /tmp/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
           #
           MANIFEST="$1"
           EXP_NAME="$2"
           DURATION="$3"
           SERVICE="$4"
+          NAMESPACE="app"
 
           mkdir -p /tmp/chaos-results
 
-          # Start k6 traffic generator (GET only, no database writes)
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v "${{ github.workspace }}:/workspace" \
-            -v /tmp/chaos-results:/tmp/chaos-results \
-            -w /workspace \
-            -e BASE_URL=http://localhost:8080 \
-            --env-file /tmp/k6-env.txt \
-            --name "k6-${EXP_NAME}" \
-            grafana/k6 run perf/chaos-traffic.js \
-              --summary-export=/tmp/chaos-results/${EXP_NAME}.json \
-              --tag test_type=chaos \
-              --tag chaos_experiment=${EXP_NAME} &
-          K6_PID=$!
+          # --- 1. Create k6 Job for chaos-traffic.js ---
+          K6_JOB="k6-chaos-${EXP_NAME}-$(date +%s)"
+          echo "=== Creating k6 Job ${K6_JOB} for chaos-traffic.js ==="
+          kubectl create configmap "${K6_JOB}-scripts" \
+            --from-file="perf/" -n "$NAMESPACE" 2>&1
+          kubectl create configmap "${K6_JOB}-env" \
+            --from-env-file="/tmp/k6-env.txt" -n "$NAMESPACE" 2>&1
+
+          cat <<JOBEOF | kubectl apply -f -
+          apiVersion: batch/v1
+          kind: Job
+          metadata:
+            name: "${K6_JOB}"
+            namespace: "${NAMESPACE}"
+            labels:
+              app: k6-test
+              chaos-experiment: "${EXP_NAME}"
+          spec:
+            backoffLimit: 0
+            template:
+              spec:
+                restartPolicy: Never
+                containers:
+                - name: k6
+                  image: grafana/k6:latest
+                  command: ["k6", "run", "/scripts/chaos-traffic.js",
+                    "--summary-export=/output/${EXP_NAME}.json",
+                    "--tag", "test_type=chaos",
+                    "--tag", "chaos_experiment=${EXP_NAME}"]
+                  envFrom:
+                  - configMapRef:
+                      name: "${K6_JOB}-env"
+                  volumeMounts:
+                  - name: scripts
+                    mountPath: /scripts
+                  - name: output
+                    mountPath: /output
+                volumes:
+                - name: scripts
+                  configMap:
+                    name: "${K6_JOB}-scripts"
+                - name: output
+                  emptyDir: {}
+          JOBEOF
+
+          # Wait for pod
+          kubectl wait --for=condition=ready pod \
+            -l "job-name=${K6_JOB}" -n "$NAMESPACE" --timeout=60s 2>&1 || true
+          K6_POD="$(kubectl get pods -l "job-name=${K6_JOB}" -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}')"
+          echo "=== k6 Job pod: ${K6_POD} ==="
 
           # Allow k6 to reach service before chaos
           sleep 3
 
-          # Apply chaos
+          # --- 2. Apply chaos ---
           echo "=== Applying ${EXP_NAME} ==="
           kubectl apply -f "${MANIFEST}"
 
-          # Start health canary: polls /health every 1s, detects outage window
+          # --- 3. Start health canary: polls /health every 1s, detects outage window ---
           echo "=== Monitoring recovery for ${EXP_NAME} ==="
           (
             OUTAGE_START=0
@@ -164,7 +201,6 @@ jobs:
                   echo "=== Canary: outage detected at t=$((i-1))s ==="
                 fi
               fi
-              # Stop early if chaos duration elapsed AND we have already recovered
               if [ "$i" -gt "$DURATION" ] && [ "$OUTAGE_END" -ne 0 ]; then
                 break
               fi
@@ -174,16 +210,34 @@ jobs:
           ) &
           CANARY_PID=$!
 
-          # Wait for chaos duration
+          # --- 4. Wait for chaos duration ---
           echo "=== Waiting ${DURATION}s for chaos ${EXP_NAME} ==="
           sleep "${DURATION}"
 
-          # Stop k6
-          echo "=== Stopping k6 for ${EXP_NAME} ==="
-          kill "${K6_PID}" 2>/dev/null || true
-          wait "${K6_PID}" 2>/dev/null || true
+          # --- 5. Wait for k6 Job to complete and extract ---
+          echo "=== Waiting for k6 Job ${K6_JOB} to complete ==="
+          kubectl wait --for=condition=complete job/"${K6_JOB}" -n "$NAMESPACE" --timeout=120s 2>&1 || {
+            echo "=== WARNING: k6 Job did not complete in time — extracting anyway ==="
+          }
 
-          # Wait for canary to finish and compute recovery
+          # Stream k6 logs
+          kubectl logs "$K6_POD" -n "$NAMESPACE" 2>&1 || true
+
+          # Extract summary
+          kubectl exec "$K6_POD" -n "$NAMESPACE" -- \
+            cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
+            echo "=== WARNING: exec cat failed, trying kubectl cp ==="
+            kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" \
+              "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
+              echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
+          }
+
+          # Delete k6 Job
+          kubectl delete job "${K6_JOB}" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+          kubectl delete configmap "${K6_JOB}-scripts" "${K6_JOB}-env" \
+            -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+
+          # --- 6. Wait for canary to finish and compute recovery ---
           wait "${CANARY_PID}" 2>/dev/null || true
           read -r OUTAGE_START OUTAGE_END < /tmp/canary-outage-${EXP_NAME}.txt 2>/dev/null || true
           OUTAGE_START=${OUTAGE_START:-0}
@@ -230,19 +284,13 @@ jobs:
       # Baseline k6 before any chaos
       # =============================================================
       - name: Baseline k6 before chaos
-        env:
-          BASE_URL: http://localhost:8080
         run: |
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v ${{ github.workspace }}:/workspace \
-            -v /tmp/chaos-results:/tmp/chaos-results \
-            -w /workspace \
-            -e BASE_URL \
-            --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/smoke.js \
-              --summary-export=baseline-before-chaos.json \
-              --tag test_type=baseline_before_chaos
+          /tmp/ct-common/scripts/k6-job-runner.sh \
+            perf/smoke.js \
+            ${{ env.SERVICE_NAME }} \
+            baseline-before-chaos.json \
+            /tmp/k6-env.txt \
+            300 baseline_before_chaos
 
       # =============================================================
       # Dynamic chaos experiments — iterate over generated manifests
@@ -325,8 +373,8 @@ jobs:
             DIFF=$(( ND_P95 - BL_P95 ))
             if [ "$DIFF" -lt 10 ] 2>/dev/null; then
               echo "=== WARNING: network-delay experiment had no observable effect (p95 diff=${DIFF}ms)."
-              echo "=== Port-forward traffic bypasses the Service overlay; delay injection may be invisible."
-              echo "=== Consider running k6 as an in-cluster Job for accurate latency injection."
+              echo "=== k6 runs in-cluster now; delay injection should reach the Service."
+              echo "=== Check Chaos Mesh NetworkChaos configuration and selector labels."
             else
               echo "=== OK: network-delay added ${DIFF}ms to p95."
             fi
@@ -347,9 +395,10 @@ jobs:
       - name: Cleanup
         if: always()
         run: |
-          # Kill any leftover k6 containers
-          docker rm -f $(docker ps -aq --filter name=k6-) 2>/dev/null || true
-          # Kill port-forward
+          # Kill any leftover k6 Jobs and ConfigMaps
+          kubectl delete job -l app=k6-test -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
+          kubectl delete configmap -l app=k6-test -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
+          # Kill port-forward (canary)
           if [ -f /tmp/pf-pid.txt ]; then
             kill $(cat /tmp/pf-pid.txt) 2>/dev/null || true
           fi

@@ -44,81 +44,50 @@ jobs:
           resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
           cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
 
-      - name: Port-forward to AKS
-        run: |
-          (
-            while true; do
-              kubectl port-forward -n app svc/${{ env.SERVICE_NAME }} 8080:8080 || true
-              sleep 1
-            done
-          ) &
-          PF_PID=$!
-          for i in $(seq 1 15); do
-            if curl -sf http://localhost:8080/health; then
-              echo "Tunnel ready after ${i} attempts"
-              exit 0
-            fi
-            sleep 2
-          done
-          echo "ERROR: Tunnel failed to become ready after 30s" >&2
-          exit 1
-
       - name: Generate k6 env from NFR
         run: |
           python3 /tmp/ct-common/scripts/nfr-to-env.py --nfr nfr.yaml --output nfr-env.sh --service ${{ env.SERVICE_NAME }}
           sed 's/^export //' nfr-env.sh > /tmp/k6-env.txt
 
       - name: Run k6 Smoke
-        env:
-          BASE_URL: http://localhost:8080
         run: |
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e BASE_URL \
-            --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/smoke.js --summary-export=smoke-results.json --tag test_type=smoke
+          /tmp/ct-common/scripts/k6-job-runner.sh \
+            perf/smoke.js \
+            ${{ env.SERVICE_NAME }} \
+            smoke-results.json \
+            /tmp/k6-env.txt \
+            300 smoke
 
       - name: Run k6 Baseline
-        env:
-          BASE_URL: http://localhost:8080
         run: |
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e BASE_URL \
-            --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/baseline.js --summary-export=baseline-results.json --tag test_type=baseline
+          /tmp/ct-common/scripts/k6-job-runner.sh \
+            perf/baseline.js \
+            ${{ env.SERVICE_NAME }} \
+            baseline-results.json \
+            /tmp/k6-env.txt \
+            600 baseline
 
       - name: Run k6 Stress
         if: ${{ inputs.run_stress_spike_tests == true }}
         continue-on-error: true
-        env:
-          BASE_URL: http://localhost:8080
         run: |
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e BASE_URL \
-            --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/stress.js --summary-export=stress-results.json --tag test_type=stress
+          /tmp/ct-common/scripts/k6-job-runner.sh \
+            perf/stress.js \
+            ${{ env.SERVICE_NAME }} \
+            stress-results.json \
+            /tmp/k6-env.txt \
+            900 stress
 
       - name: Run k6 Spike
         if: ${{ inputs.run_stress_spike_tests == true }}
         continue-on-error: true
-        env:
-          BASE_URL: http://localhost:8080
         run: |
-          docker run --rm --network host \
-            --user "$(id -u):$(id -g)" \
-            -v ${{ github.workspace }}:/workspace \
-            -w /workspace \
-            -e BASE_URL \
-            --env-file /tmp/k6-env.txt \
-            grafana/k6 run perf/spike.js --summary-export=spike-results.json --tag test_type=spike
+          /tmp/ct-common/scripts/k6-job-runner.sh \
+            perf/spike.js \
+            ${{ env.SERVICE_NAME }} \
+            spike-results.json \
+            /tmp/k6-env.txt \
+            600 spike
 
       - name: Upload Results
         uses: actions/upload-artifact@v4
@@ -156,3 +125,9 @@ jobs:
         with:
           name: gate-summary
           path: gate-summary.json
+
+      - name: Cleanup orphaned k6 jobs
+        if: always()
+        run: |
+          kubectl delete job -l app=k6-test -n app --ignore-not-found 2>/dev/null || true
+          kubectl delete configmap -l app=k6-test -n app --ignore-not-found 2>/dev/null || true
