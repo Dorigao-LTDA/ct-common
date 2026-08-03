@@ -116,12 +116,12 @@ if [ "$LOG_RC" -eq 124 ]; then
 fi
 
 # ------------------------------------------------------------------
-# 5. Extract summary (best-effort; pod may not be running after completion)
+# 5. Extract summary (kubectl cp works on completed pods; exec does not)
 # ------------------------------------------------------------------
 echo "=== k6-job-runner: extracting ${SUMMARY_FILE} ==="
-kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
-  echo "=== k6-job-runner: WARNING: exec cat failed, trying kubectl cp ==="
-  kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
+kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
+  echo "=== k6-job-runner: WARNING: kubectl cp failed, trying exec ==="
+  kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
     echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
     touch "./${SUMMARY_FILE}"
   }

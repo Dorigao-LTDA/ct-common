@@ -462,7 +462,10 @@ jobs:
                   echo "=== Canary: outage detected at t=$((i-1))s ==="
                 fi
               fi
-              if [ "$i" -gt "$DURATION" ] && [ "$OUTAGE_END" -ne 0 ]; then break; fi
+              if [ "$i" -gt "$DURATION" ]; then
+                if [ "$OUTAGE_START" -eq 0 ]; then break; fi
+                if [ "$OUTAGE_END" -ne 0 ]; then break; fi
+              fi
               sleep 1
             done
             echo "$OUTAGE_START $OUTAGE_END" > /tmp/canary-outage-${EXP_NAME}.txt
@@ -480,8 +483,8 @@ jobs:
           }
           kubectl logs "$K6_POD" -n "$NAMESPACE" 2>&1 || true
 
-          kubectl exec "$K6_POD" -n "$NAMESPACE" -- \
-            cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
+          kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" \
+            "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
             echo "=== WARNING: could not extract k6 summary ==="
             echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
           }

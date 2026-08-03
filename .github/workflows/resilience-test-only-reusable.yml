@@ -201,8 +201,11 @@ jobs:
                   echo "=== Canary: outage detected at t=$((i-1))s ==="
                 fi
               fi
-              if [ "$i" -gt "$DURATION" ] && [ "$OUTAGE_END" -ne 0 ]; then
-                break
+              if [ "$i" -gt "$DURATION" ]; then
+                # No outage at all after chaos duration → service was resilient, stop canary
+                if [ "$OUTAGE_START" -eq 0 ]; then break; fi
+                # Outage was detected AND recovered → stop canary
+                if [ "$OUTAGE_END" -ne 0 ]; then break; fi
               fi
               sleep 1
             done
@@ -223,12 +226,12 @@ jobs:
           # Stream k6 logs
           kubectl logs "$K6_POD" -n "$NAMESPACE" 2>&1 || true
 
-          # Extract summary
-          kubectl exec "$K6_POD" -n "$NAMESPACE" -- \
-            cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
-            echo "=== WARNING: exec cat failed, trying kubectl cp ==="
-            kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" \
-              "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
+          # Extract summary (kubectl cp works on completed pods; exec does not)
+          kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" \
+            "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
+            echo "=== WARNING: kubectl cp failed, trying exec ==="
+            kubectl exec "$K6_POD" -n "$NAMESPACE" -- \
+              cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
               echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
           }
 
