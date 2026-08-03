@@ -404,6 +404,6 @@ jobs:
           fi
           pkill -f "port-forward.*svc/${{ env.SERVICE_NAME }}" 2>/dev/null || true
           # Remove any leftover chaos resources
-          kubectl delete podchaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
-          kubectl delete networkchaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
-          kubectl delete stresschaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
+          timeout 30s kubectl delete podchaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
+          timeout 30s kubectl delete networkchaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
+          timeout 30s kubectl delete stresschaos --all -n ${{ env.CHAOS_NAMESPACE }} --ignore-not-found 2>/dev/null || true
