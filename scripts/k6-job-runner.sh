@@ -101,36 +101,52 @@ if ! kubectl wait --for=condition=ready pod \
 fi
 
 POD_NAME="$(kubectl get pods -l "job-name=${JOB_NAME}" -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}')"
-echo "=== k6-job-runner: pod ${POD_NAME} ready, streaming logs ==="
+echo "=== k6-job-runner: pod ${POD_NAME} ready ==="
 
 # ------------------------------------------------------------------
-# 4. Stream + wait
+# 4. Stream logs in background + poll for summary file
 # ------------------------------------------------------------------
-set +e
-timeout "$TIMEOUT" kubectl logs -f "$POD_NAME" -n "$NAMESPACE" 2>&1
-LOG_RC=$?
-set -e
+# Log stream runs in background (blocks until container exits)
+kubectl logs -f "$POD_NAME" -n "$NAMESPACE" 2>&1 &
+LOG_PID=$!
 
-if [ "$LOG_RC" -eq 124 ]; then
-  echo "=== k6-job-runner: TIMEOUT after ${TIMEOUT}s ==="
-fi
+# Poll for summary file. k6 writes it at end of test; container stays
+# alive ~30s during gracefulStop — extract it while we can.
+EXTRACTED=false
+for i in $(seq 1 "$TIMEOUT"); do
+  if kubectl exec "$POD_NAME" -n "$NAMESPACE" -- test -f "/output/${SUMMARY_FILE}" 2>/dev/null; then
+    kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
+      EXTRACTED=true
+      echo "=== k6-job-runner: extracted ${SUMMARY_FILE} at t+${i}s ==="
+    }
+    break
+  fi
+  sleep 1
+done
+
+# Wait for log stream to finish (container exits)
+wait "$LOG_PID" 2>/dev/null || true
 
 # ------------------------------------------------------------------
-# 5. Extract summary (kubectl cp works on completed pods; exec does not)
+# 5. If still not extracted, try one last time (container may have exited)
 # ------------------------------------------------------------------
-echo "=== k6-job-runner: extracting ${SUMMARY_FILE} ==="
-kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
-  echo "=== k6-job-runner: WARNING: kubectl cp failed, trying exec ==="
+if ! $EXTRACTED; then
+  echo "=== k6-job-runner: late extraction attempt for ${SUMMARY_FILE} ==="
   kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
-    echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
-    touch "./${SUMMARY_FILE}"
+    kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
+      echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
+      touch "./${SUMMARY_FILE}"
+    }
   }
-}
+fi
 echo "=== k6-job-runner: summary size: $(wc -c < "./${SUMMARY_FILE}" 2>/dev/null || echo 0) bytes ==="
 
 # ------------------------------------------------------------------
-# 6. Check job result
+# 6. Wait for job to finish (may already be done) and check result
 # ------------------------------------------------------------------
+kubectl wait --for=condition=complete job/"$JOB_NAME" -n "$NAMESPACE" --timeout=30s 2>/dev/null || true
+kubectl wait --for=condition=failed job/"$JOB_NAME" -n "$NAMESPACE" --timeout=10s 2>/dev/null || true
+
 JOB_SUCCEEDED="$(kubectl get job "$JOB_NAME" -n "$NAMESPACE" -o jsonpath='{.status.succeeded}' 2>/dev/null || echo "0")"
 cleanup_and_exit() {
   local exit_code="${1:-1}"

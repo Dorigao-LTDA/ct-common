@@ -215,9 +215,25 @@ jobs:
 
           # --- 4. Wait for chaos duration ---
           echo "=== Waiting ${DURATION}s for chaos ${EXP_NAME} ==="
+
+          # Background: poll for k6 summary as soon as k6 finishes writing it.
+          # k6 runs ~1m; chaos DURATION is 120s. The container would be long
+          # exited by the time we reach step 5, so extract early.
+          (
+            for i in $(seq 1 $(( DURATION + 120 ))); do
+              if kubectl exec "$K6_POD" -n "$NAMESPACE" -- test -f "/output/${EXP_NAME}.json" 2>/dev/null; then
+                kubectl exec "$K6_POD" -n "$NAMESPACE" -- cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null
+                echo "=== Extracted k6 summary for ${EXP_NAME} at t+${i}s ==="
+                break
+              fi
+              sleep 1
+            done
+          ) &
+          EXTRACT_PID=$!
+
           sleep "${DURATION}"
 
-          # --- 5. Wait for k6 Job to complete and extract ---
+          # --- 5. Wait for k6 Job to complete, stream logs ---
           echo "=== Waiting for k6 Job ${K6_JOB} to complete ==="
           kubectl wait --for=condition=complete job/"${K6_JOB}" -n "$NAMESPACE" --timeout=120s 2>&1 || {
             echo "=== WARNING: k6 Job did not complete in time — extracting anyway ==="
@@ -226,14 +242,17 @@ jobs:
           # Stream k6 logs
           kubectl logs "$K6_POD" -n "$NAMESPACE" 2>&1 || true
 
-          # Extract summary (kubectl cp works on completed pods; exec does not)
-          kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" \
-            "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
-            echo "=== WARNING: kubectl cp failed, trying exec ==="
-            kubectl exec "$K6_POD" -n "$NAMESPACE" -- \
-              cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
-              echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
-          }
+          # Wait for background extraction to finish
+          wait "${EXTRACT_PID}" 2>/dev/null || true
+
+          # If still missing, last-resort attempt
+          if [ ! -s "/tmp/chaos-results/${EXP_NAME}.json" ]; then
+            echo "=== WARNING: k6 summary still empty — last-resort extraction ==="
+            kubectl exec "$K6_POD" -n "$NAMESPACE" -- cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
+              kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
+                echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
+            }
+          fi
 
           # Delete k6 Job
           kubectl delete job "${K6_JOB}" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
