@@ -738,17 +738,19 @@ jobs:
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
         run: |
           pip install -q openai 2>/dev/null || pip install openai
-          # Prefer OIDC token; fall back to secrets.LLM_API_KEY if set
-          OIDC_TOKEN=$(az account get-access-token \
-            --resource https://cognitiveservices.azure.com \
-            --query accessToken -o tsv 2>/dev/null || echo "")
-          if [ -n "$OIDC_TOKEN" ]; then
-            export LLM_API_KEY="$OIDC_TOKEN"
-            echo "Using OIDC token for LLM auth"
-          elif [ -n "$LLM_API_KEY" ]; then
-            echo "Using secrets.LLM_API_KEY for LLM auth"
+          # Prefer configured API key; fall back to OIDC token for Azure OpenAI RBAC
+          if [ -n "$LLM_API_KEY" ]; then
+            echo "Using configured LLM_API_KEY for LLM auth"
           else
-            echo "WARNING: No LLM auth token available. Report will be partial."
+            OIDC_TOKEN=$(az account get-access-token \
+              --resource https://cognitiveservices.azure.com \
+              --query accessToken -o tsv 2>/dev/null || echo "")
+            if [ -n "$OIDC_TOKEN" ]; then
+              export LLM_API_KEY="$OIDC_TOKEN"
+              echo "Using OIDC token for LLM auth"
+            else
+              echo "WARNING: No LLM auth available. Report will be partial."
+            fi
           fi
           python3 /tmp/ct-common/scripts/insights/analyze.py \
             --input insights-input.json \
