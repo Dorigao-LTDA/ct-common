@@ -137,12 +137,6 @@ jobs:
     needs: [performance-test]
     runs-on: ubuntu-latest
     if: always()
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
-    env:
-      SERVICE_NAME: ${{ inputs.service_name }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -154,29 +148,6 @@ jobs:
       - name: Download all test artifacts
         uses: actions/download-artifact@v4
 
-      - name: Analyze code changes
-        continue-on-error: true
-        run: |
-          BASE=$(git merge-base HEAD~1 HEAD 2>/dev/null || echo "HEAD~1")
-          python3 /tmp/ct-common/scripts/insights/code-analyze.py \
-            --repo-path . \
-            --base-ref "$BASE" \
-            --service ${{ inputs.service_name }} \
-            --output insights-input-code.json
-
-      - name: Azure Login (for LLM OIDC token)
-        uses: azure/login@v2
-        with:
-          client-id: ${{ secrets.AZURE_CLIENT_ID }}
-          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
-          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
-
-      - name: Set AKS Context
-        uses: azure/aks-set-context@v3
-        with:
-          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
-          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
-
       - name: Collect test data
         run: |
           python3 /tmp/ct-common/scripts/insights/collect.py \
@@ -186,31 +157,10 @@ jobs:
             --commit ${{ github.sha }} \
             --output insights-input.json
 
-      - name: Analyze with LLM
-        env:
-          LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
-          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
-        run: |
-          pip install -q openai 2>/dev/null || pip install openai
-          if [ -n "$LLM_API_KEY" ]; then
-            echo "Using configured LLM_API_KEY for auth"
-          else
-            TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv 2>/dev/null || echo "")
-            if [ -n "$TOKEN" ]; then
-              export LLM_API_KEY="$TOKEN"
-              echo "Using OIDC token for auth"
-            else
-              echo "WARNING: No LLM auth available"
-            fi
-          fi
-          python3 /tmp/ct-common/scripts/insights/analyze.py \
-            --input insights-input.json \
-            --output insights-llm-response.json
-
       - name: Generate report
         if: always()
         run: |
+          echo '{"summary": "Insights pipeline configured. LLM integration pending."}' > insights-llm-response.json
           python3 /tmp/ct-common/scripts/insights/report.py \
             --test-data insights-input.json \
             --llm-response insights-llm-response.json \
