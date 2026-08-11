@@ -31,35 +31,10 @@ JOB_NAME="k6-${SUMMARY_FILE%.json}-$(date +%s)"
 NAMESPACE="app"
 
 # ------------------------------------------------------------------
-# 1. Create wrapper with handleSummary (replaces deprecated --summary-export)
+# 1. Create ConfigMaps
 # ------------------------------------------------------------------
 echo "=== k6-job-runner: creating ConfigMaps for ${JOB_NAME} ==="
-
-# Generate ESM wrapper that imports the test script and adds handleSummary().
-# ponytail: --summary-export was removed in k6 v0.48+ (no Docker tags <1.0.0 exist).
-# handleSummary() is the only way to write aggregated summary JSON to a file.
-WRAPPER="/tmp/k6-wrapper-${JOB_NAME}.js"
-cat > "$WRAPPER" << JSEOF
-// ponytail: k6 goja runtime does not support re-export syntax (export {default} from).
-// Use explicit import+export pattern instead.
-import mod, { options as modOptions } from '/scripts/${SCRIPT_BASENAME}';
-export default mod;
-export const options = modOptions;
-
-export function handleSummary(data) {
-  const summary = { metrics: {} };
-  for (const [name, m] of Object.entries(data.metrics)) {
-    if (m && m.values) summary.metrics[name] = { values: m.values };
-  }
-  return {
-    'stdout': JSON.stringify(summary),
-    '/output/${SUMMARY_FILE}': JSON.stringify(summary),
-  };
-}
-JSEOF
-
 kubectl create configmap "${JOB_NAME}-scripts" \
-  --from-file="$WRAPPER" \
   --from-file="${SCRIPT_DIR}/" \
   -n "$NAMESPACE" 2>&1
 
@@ -70,8 +45,11 @@ kubectl create configmap "${JOB_NAME}-env" \
 # ------------------------------------------------------------------
 # 2. Build k6 command and apply Job
 # ------------------------------------------------------------------
-WRAPPER_BASENAME="$(basename "$WRAPPER")"
-k6_cmd="k6 run /scripts/${WRAPPER_BASENAME}"
+# ponytail: --summary-export removed in k6 v0.48+. Use --out json (NDJSON) +
+# post-processing with ndjson-to-summary.py instead of handleSummary() wrapper
+# (goja ESM re-export has runtime limitations).
+RAW_FILE="raw-${SUMMARY_FILE%.json}.ndjson"
+k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --out json=/output/${RAW_FILE}"
 if [ -n "$TAG" ]; then
   k6_cmd="${k6_cmd} --tag test_type=${TAG}"
 fi
@@ -140,7 +118,7 @@ LOG_PID=$!
 ( sleep "$TIMEOUT"; kill "$LOG_PID" 2>/dev/null ) &
 LOG_KILLER=$!
 
-# Poll for summary file. k6 writes it at end of test; container stays
+# Poll for raw NDJSON file. k6 writes it during test; container stays
 # alive ~30s during gracefulStop — extract it while we can.
 # ponytail: sh -c + timeout 5 — 'test' is a shell built-in (not a binary
 # in grafana/k6 image), and per-call deadline prevents hangs on exited containers.
@@ -153,10 +131,14 @@ while true; do
     echo "=== k6-job-runner: timeout after ${ELAPSED}s, stopping poll ==="
     break
   fi
-  if timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
-    timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
-      EXTRACTED=true
-      echo "=== k6-job-runner: extracted ${SUMMARY_FILE} at t+${ELAPSED}s ==="
+  # Extract raw NDJSON, then convert to summary JSON
+  if timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${RAW_FILE}" 2>/dev/null; then
+    timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${RAW_FILE}" > "./${RAW_FILE}" 2>/dev/null && {
+      # Convert NDJSON to summary JSON format
+      if python3 "$(dirname "$0")/ndjson-to-summary.py" --input "./${RAW_FILE}" --output "./${SUMMARY_FILE}" 2>/dev/null; then
+        EXTRACTED=true
+        echo "=== k6-job-runner: extracted + converted ${SUMMARY_FILE} at t+${ELAPSED}s ==="
+      fi
     }
     break
   fi
@@ -171,12 +153,16 @@ kill "$LOG_KILLER" 2>/dev/null || true
 # 5. If still not extracted, try one last time (container may have exited)
 # ------------------------------------------------------------------
 if ! $EXTRACTED; then
-  echo "=== k6-job-runner: late extraction attempt for ${SUMMARY_FILE} ==="
-  timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
-    timeout 5 kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
-      echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
-      touch "./${SUMMARY_FILE}"
+  echo "=== k6-job-runner: late extraction attempt for ${RAW_FILE} ==="
+  timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${RAW_FILE}" > "./${RAW_FILE}" 2>/dev/null || {
+    timeout 5 kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${RAW_FILE}" "./${RAW_FILE}" 2>/dev/null || {
+      echo "=== k6-job-runner: WARNING: could not extract NDJSON — file may be empty ==="
+      touch "./${RAW_FILE}"
     }
+  }
+  python3 "$(dirname "$0")/ndjson-to-summary.py" --input "./${RAW_FILE}" --output "./${SUMMARY_FILE}" 2>/dev/null || {
+    echo "=== k6-job-runner: WARNING: NDJSON conversion failed ==="
+    touch "./${SUMMARY_FILE}"
   }
 fi
 echo "=== k6-job-runner: summary size: $(wc -c < "./${SUMMARY_FILE}" 2>/dev/null || echo 0) bytes ==="
@@ -194,7 +180,7 @@ cleanup_and_exit() {
   kubectl delete job "$JOB_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
   kubectl delete configmap "${JOB_NAME}-scripts" "${JOB_NAME}-env" \
     -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
-  rm -f "$WRAPPER" 2>/dev/null || true
+  rm -f "./${RAW_FILE}" 2>/dev/null || true
   exit "$exit_code"
 }
 
