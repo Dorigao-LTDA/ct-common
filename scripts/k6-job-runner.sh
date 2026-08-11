@@ -45,9 +45,8 @@ kubectl create configmap "${JOB_NAME}-env" \
 # ------------------------------------------------------------------
 # 2. Build k6 command and apply Job
 # ------------------------------------------------------------------
-# ponytail: --out json (NDJSON) replaces deprecated --summary-export removed in k6 v0.50+.
-# All downstream parsers (evaluate-gates.py, collect.py) handle both formats via load_k6_result().
-k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --out json=/output/${SUMMARY_FILE}"
+# ponytail: --summary-export removed in grafana/k6:0.48+. Pin to 0.47.0.
+k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --summary-export=/output/${SUMMARY_FILE}"
 if [ -n "$TAG" ]; then
   k6_cmd="${k6_cmd} --tag test_type=${TAG}"
 fi
@@ -69,7 +68,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: k6
-        image: grafana/k6:latest
+        image: grafana/k6:0.47.0
         command: ["sh", "-c"]
         args:
         - "${k6_cmd}"
