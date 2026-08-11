@@ -31,10 +31,32 @@ JOB_NAME="k6-${SUMMARY_FILE%.json}-$(date +%s)"
 NAMESPACE="app"
 
 # ------------------------------------------------------------------
-# 1. Create ConfigMaps
+# 1. Create wrapper with handleSummary (replaces deprecated --summary-export)
 # ------------------------------------------------------------------
 echo "=== k6-job-runner: creating ConfigMaps for ${JOB_NAME} ==="
+
+# Generate ESM wrapper that imports the test script and adds handleSummary().
+# ponytail: --summary-export was removed in k6 v0.48+ (no Docker tags <1.0.0 exist).
+# handleSummary() is the only way to write aggregated summary JSON to a file.
+WRAPPER="/tmp/k6-wrapper-${JOB_NAME}.js"
+cat > "$WRAPPER" << JSEOF
+export { default } from '/scripts/${SCRIPT_BASENAME}';
+export { options } from '/scripts/${SCRIPT_BASENAME}';
+
+export function handleSummary(data) {
+  const summary = { metrics: {} };
+  for (const [name, m] of Object.entries(data.metrics)) {
+    if (m.values) summary.metrics[name] = { values: m.values };
+  }
+  return {
+    'stdout': JSON.stringify(summary),
+    '/output/${SUMMARY_FILE}': JSON.stringify(summary),
+  };
+}
+JSEOF
+
 kubectl create configmap "${JOB_NAME}-scripts" \
+  --from-file="$WRAPPER" \
   --from-file="${SCRIPT_DIR}/" \
   -n "$NAMESPACE" 2>&1
 
@@ -45,8 +67,8 @@ kubectl create configmap "${JOB_NAME}-env" \
 # ------------------------------------------------------------------
 # 2. Build k6 command and apply Job
 # ------------------------------------------------------------------
-# ponytail: --summary-export removed in grafana/k6:0.48+. Pin to 0.47.0.
-k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --summary-export=/output/${SUMMARY_FILE}"
+WRAPPER_BASENAME="$(basename "$WRAPPER")"
+k6_cmd="k6 run /scripts/${WRAPPER_BASENAME}"
 if [ -n "$TAG" ]; then
   k6_cmd="${k6_cmd} --tag test_type=${TAG}"
 fi
@@ -68,7 +90,7 @@ spec:
       restartPolicy: Never
       containers:
       - name: k6
-        image: grafana/k6:0.47.0
+        image: grafana/k6:latest
         command: ["sh", "-c"]
         args:
         - "${k6_cmd}"
@@ -169,6 +191,7 @@ cleanup_and_exit() {
   kubectl delete job "$JOB_NAME" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
   kubectl delete configmap "${JOB_NAME}-scripts" "${JOB_NAME}-env" \
     -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
+  rm -f "$WRAPPER" 2>/dev/null || true
   exit "$exit_code"
 }
 
