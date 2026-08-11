@@ -40,13 +40,16 @@ echo "=== k6-job-runner: creating ConfigMaps for ${JOB_NAME} ==="
 # handleSummary() is the only way to write aggregated summary JSON to a file.
 WRAPPER="/tmp/k6-wrapper-${JOB_NAME}.js"
 cat > "$WRAPPER" << JSEOF
-export { default } from '/scripts/${SCRIPT_BASENAME}';
-export { options } from '/scripts/${SCRIPT_BASENAME}';
+// ponytail: k6 goja runtime does not support re-export syntax (export {default} from).
+// Use explicit import+export pattern instead.
+import mod, { options as modOptions } from '/scripts/${SCRIPT_BASENAME}';
+export default mod;
+export const options = modOptions;
 
 export function handleSummary(data) {
   const summary = { metrics: {} };
   for (const [name, m] of Object.entries(data.metrics)) {
-    if (m.values) summary.metrics[name] = { values: m.values };
+    if (m && m.values) summary.metrics[name] = { values: m.values };
   }
   return {
     'stdout': JSON.stringify(summary),
