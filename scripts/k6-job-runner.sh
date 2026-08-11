@@ -45,7 +45,9 @@ kubectl create configmap "${JOB_NAME}-env" \
 # ------------------------------------------------------------------
 # 2. Build k6 command and apply Job
 # ------------------------------------------------------------------
-k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --summary-export=/output/${SUMMARY_FILE}"
+# ponytail: --out json (NDJSON) replaces deprecated --summary-export removed in k6 v0.50+.
+# All downstream parsers (evaluate-gates.py, collect.py) handle both formats via load_k6_result().
+k6_cmd="k6 run /scripts/${SCRIPT_BASENAME} --out json=/output/${SUMMARY_FILE}"
 if [ -n "$TAG" ]; then
   k6_cmd="${k6_cmd} --tag test_type=${TAG}"
 fi
