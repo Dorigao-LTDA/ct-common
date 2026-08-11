@@ -131,3 +131,136 @@ jobs:
         run: |
           kubectl delete job -l app=k6-test -n app --ignore-not-found 2>/dev/null || true
           kubectl delete configmap -l app=k6-test -n app --ignore-not-found 2>/dev/null || true
+
+  # =============================================
+  # Stage: LLM Insights & Developer Report
+  # =============================================
+  insights-report:
+    name: Insights & Developer Report
+    needs: [performance-test]
+    runs-on: ubuntu-latest
+    if: always()
+    permissions:
+      id-token: write
+      contents: read
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone shared toolkit
+        run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-common.git /tmp/ct-common
+
+      - name: Download all test artifacts
+        uses: actions/download-artifact@v4
+
+      - name: Analyze code changes
+        continue-on-error: true
+        run: |
+          BASE=$(git merge-base HEAD~1 HEAD 2>/dev/null || echo "HEAD~1")
+          python3 /tmp/ct-common/scripts/insights/code-analyze.py \
+            --repo-path . \
+            --base-ref "$BASE" \
+            --service ${{ env.SERVICE_NAME }} \
+            --output insights-input-code.json
+
+      - name: Azure Login + Set AKS Context (for LLM OIDC + o11y)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Collect observability data
+        id: o11y
+        continue-on-error: true
+        run: |
+          kubectl port-forward -n observability svc/mimir-gateway 9090:8080 &
+          kubectl port-forward -n observability svc/loki 3100:3100 &
+          kubectl port-forward -n observability svc/tempo 3200:3100 &
+          sleep 5
+          python3 /tmp/ct-common/scripts/insights/o11y-collect.py \
+            --mimir-url http://localhost:9090/prometheus \
+            --loki-url http://localhost:3100 \
+            --tempo-url http://localhost:3200 \
+            --service ${{ env.SERVICE_NAME }} \
+            --test-window "$(date -u -d '15 minutes ago' +%Y-%m-%dT%H:%M:%SZ)/$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --output insights-input-o11y.json
+          kill %1 %2 %3 2>/dev/null || true
+
+      - name: Collect test data
+        run: |
+          python3 /tmp/ct-common/scripts/insights/collect.py \
+            --artifacts-dir . \
+            --nfr nfr.yaml \
+            --service ${{ env.SERVICE_NAME }} \
+            --commit ${{ github.sha }} \
+            --o11y-input insights-input-o11y.json \
+            --code-input insights-input-code.json \
+            --output insights-input.json
+
+      - name: Analyze with LLM
+        env:
+          LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
+          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}
+          LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
+        run: |
+          pip install -q openai 2>/dev/null || pip install openai
+          if [ -n "$LLM_API_KEY" ]; then
+            echo "Using configured LLM_API_KEY for LLM auth"
+          else
+            OIDC_TOKEN=$(az account get-access-token \
+              --resource https://cognitiveservices.azure.com \
+              --query accessToken -o tsv 2>/dev/null || echo "")
+            if [ -n "$OIDC_TOKEN" ]; then
+              export LLM_API_KEY="$OIDC_TOKEN"
+              echo "Using OIDC token for LLM auth"
+            else
+              echo "WARNING: No LLM auth available. Report will be partial."
+            fi
+          fi
+          python3 /tmp/ct-common/scripts/insights/analyze.py \
+            --input insights-input.json \
+            --output insights-llm-response.json
+
+      - name: Generate report
+        if: always()
+        run: |
+          python3 /tmp/ct-common/scripts/insights/report.py \
+            --test-data insights-input.json \
+            --llm-response insights-llm-response.json \
+            --output insights-report.md
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: insights-report-${{ env.SERVICE_NAME }}
+          path: |
+            insights-report.md
+            insights-report.json
+            insights-input.json
+
+      - name: Post report as PR comment
+        if: github.event_name == 'pull_request'
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const report = fs.readFileSync('insights-report.md', 'utf8');
+            const truncated = report.length > 60000
+              ? report.substring(0, 60000) + '\n\n> ... (truncated — full report in artifacts)'
+              : report;
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: truncated
+            });
