@@ -106,18 +106,22 @@ echo "=== k6-job-runner: pod ${POD_NAME} ready ==="
 # ------------------------------------------------------------------
 # 4. Stream logs in background + poll for summary file
 # ------------------------------------------------------------------
-# Log stream runs in background (blocks until container exits)
+# Log stream runs in background (blocks until container exits).
+# ponytail: timeout wrapper — kubectl logs -f can hang indefinitely after
+# container exit. Fork a deadline killer so the polling loop never deadlocks.
 kubectl logs -f "$POD_NAME" -n "$NAMESPACE" 2>&1 &
 LOG_PID=$!
+( sleep "$TIMEOUT"; kill "$LOG_PID" 2>/dev/null ) &
+LOG_KILLER=$!
 
 # Poll for summary file. k6 writes it at end of test; container stays
 # alive ~30s during gracefulStop — extract it while we can.
+# ponytail: sh -c + timeout 10 — 'test' is a shell built-in (not a binary
+# in grafana/k6 image), and per-call deadline prevents hangs on exited containers.
 EXTRACTED=false
 for i in $(seq 1 "$TIMEOUT"); do
-  # ponytail: sh -c wrapper — 'test' is a shell built-in, not a binary in
-  # grafana/k6 image. Bare `kubectl exec` looks for /usr/bin/test and fails.
-  if kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
-    kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
+  if timeout 10 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
+    timeout 10 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
       EXTRACTED=true
       echo "=== k6-job-runner: extracted ${SUMMARY_FILE} at t+${i}s ==="
     }
@@ -126,16 +130,17 @@ for i in $(seq 1 "$TIMEOUT"); do
   sleep 1
 done
 
-# Wait for log stream to finish (container exits)
+# Reap background processes
 wait "$LOG_PID" 2>/dev/null || true
+kill "$LOG_KILLER" 2>/dev/null || true
 
 # ------------------------------------------------------------------
 # 5. If still not extracted, try one last time (container may have exited)
 # ------------------------------------------------------------------
 if ! $EXTRACTED; then
   echo "=== k6-job-runner: late extraction attempt for ${SUMMARY_FILE} ==="
-  kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
-    kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
+  timeout 10 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
+    timeout 10 kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
       echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
       touch "./${SUMMARY_FILE}"
     }
