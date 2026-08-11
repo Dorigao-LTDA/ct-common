@@ -114,8 +114,10 @@ LOG_PID=$!
 # alive ~30s during gracefulStop — extract it while we can.
 EXTRACTED=false
 for i in $(seq 1 "$TIMEOUT"); do
-  if kubectl exec "$POD_NAME" -n "$NAMESPACE" -- test -f "/output/${SUMMARY_FILE}" 2>/dev/null; then
-    kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
+  # ponytail: sh -c wrapper — 'test' is a shell built-in, not a binary in
+  # grafana/k6 image. Bare `kubectl exec` looks for /usr/bin/test and fails.
+  if kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
+    kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
       EXTRACTED=true
       echo "=== k6-job-runner: extracted ${SUMMARY_FILE} at t+${i}s ==="
     }
@@ -132,7 +134,7 @@ wait "$LOG_PID" 2>/dev/null || true
 # ------------------------------------------------------------------
 if ! $EXTRACTED; then
   echo "=== k6-job-runner: late extraction attempt for ${SUMMARY_FILE} ==="
-  kubectl exec "$POD_NAME" -n "$NAMESPACE" -- cat "/output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
+  kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
     kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
       echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
       touch "./${SUMMARY_FILE}"
