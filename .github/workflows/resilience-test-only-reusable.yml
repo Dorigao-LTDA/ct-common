@@ -17,21 +17,6 @@ on:
         required: false
         type: number
         default: 120
-      run_pod_kill:
-        description: 'DEPRECATED: use chaos_experiments_filter instead'
-        required: false
-        type: boolean
-        default: true
-      run_network_delay:
-        description: 'DEPRECATED: use chaos_experiments_filter instead'
-        required: false
-        type: boolean
-        default: true
-      run_cpu_stress:
-        description: 'DEPRECATED: use chaos_experiments_filter instead'
-        required: false
-        type: boolean
-        default: true
 
 permissions:
   id-token: write
@@ -98,189 +83,43 @@ jobs:
           ls -la chaos-generated/
 
       # ---------------------------------------------------------------
-      # Helper: run one chaos experiment with in-cluster k6 + canary recovery
+      # 3. Run all chaos experiments using the runner script
       # ---------------------------------------------------------------
-      - name: Write chaos runner script
-        shell: bash
+      - name: Run all chaos experiments
+        env:
+          FILTER: ${{ inputs.chaos_experiments_filter }}
         run: |
-          cat > /tmp/run-chaos-experiment.sh << 'RUNNER'
-          #!/usr/bin/env bash
-          set -euo pipefail
-          #
-          # run-chaos-experiment <manifest> <experiment_name> <duration_seconds> <service>
-          #
-          # 1. Starts k6 Job in-cluster (chaos-traffic.js, GET only)
-          # 2. Applies chaos manifest
-          # 3. Runs health canary (curl /health via port-forward) to measure real outage
-          # 4. Waits for chaos duration
-          # 5. Waits for k6 Job to complete, extracts summary
-          # 6. Cleans up (--wait=false, no hang on stresschaos finalizers)
-          # Writes: /tmp/chaos-results/<exp_name>.json, /tmp/chaos-recovery-times.txt
-          #
-          MANIFEST="$1"
-          EXP_NAME="$2"
-          DURATION="$3"
-          SERVICE="$4"
-          NAMESPACE="app"
+          jq -c '.experiments[]' chaos-generated/manifest-list.json | while read exp; do
+            NAME=$(echo "$exp" | jq -r '.name')
+            FILE=$(echo "$exp" | jq -r '.file')
+            TYPE=$(echo "$exp" | jq -r '.type')
 
-          mkdir -p /tmp/chaos-results
-
-          # --- 1. Create k6 Job for chaos-traffic.js ---
-          K6_JOB="k6-chaos-${EXP_NAME}-$(date +%s)"
-          echo "=== Creating k6 Job ${K6_JOB} for chaos-traffic.js ==="
-          kubectl create configmap "${K6_JOB}-scripts" \
-            --from-file="perf/" -n "$NAMESPACE" 2>&1
-          kubectl create configmap "${K6_JOB}-env" \
-            --from-env-file="/tmp/k6-env.txt" -n "$NAMESPACE" 2>&1
-
-          cat <<JOBEOF | kubectl apply -f -
-          apiVersion: batch/v1
-          kind: Job
-          metadata:
-            name: "${K6_JOB}"
-            namespace: "${NAMESPACE}"
-            labels:
-              app: k6-test
-              chaos-experiment: "${EXP_NAME}"
-          spec:
-            backoffLimit: 0
-            template:
-              spec:
-                restartPolicy: Never
-                containers:
-                - name: k6
-                  image: grafana/k6:latest
-                  command: ["k6", "run", "/scripts/chaos-traffic.js",
-                    "--summary-export=/output/${EXP_NAME}.json",
-                    "--tag", "test_type=chaos",
-                    "--tag", "chaos_experiment=${EXP_NAME}"]
-                  envFrom:
-                  - configMapRef:
-                      name: "${K6_JOB}-env"
-                  volumeMounts:
-                  - name: scripts
-                    mountPath: /scripts
-                  - name: output
-                    mountPath: /output
-                volumes:
-                - name: scripts
-                  configMap:
-                    name: "${K6_JOB}-scripts"
-                - name: output
-                  emptyDir: {}
-          JOBEOF
-
-          # Wait for pod
-          kubectl wait --for=condition=ready pod \
-            -l "job-name=${K6_JOB}" -n "$NAMESPACE" --timeout=60s 2>&1 || true
-          K6_POD="$(kubectl get pods -l "job-name=${K6_JOB}" -n "$NAMESPACE" -o jsonpath='{.items[0].metadata.name}')"
-          echo "=== k6 Job pod: ${K6_POD} ==="
-
-          # Allow k6 to reach service before chaos
-          sleep 3
-
-          # --- 2. Apply chaos ---
-          echo "=== Applying ${EXP_NAME} ==="
-          kubectl apply -f "${MANIFEST}"
-
-          # --- 3. Start health canary: polls /health every 1s, detects outage window ---
-          echo "=== Monitoring recovery for ${EXP_NAME} ==="
-          (
-            OUTAGE_START=0
-            OUTAGE_END=0
-            CANARY_MAX=$(( DURATION + 300 ))
-            for i in $(seq 1 ${CANARY_MAX}); do
-              if curl -sf --max-time 5 http://localhost:8080/health >/dev/null 2>&1; then
-                if [ "$OUTAGE_START" -ne 0 ] && [ "$OUTAGE_END" -eq 0 ]; then
-                  OUTAGE_END=$(date +%s)
-                  echo "=== Canary: recovered at t=$((i-1))s ==="
-                fi
-              else
-                if [ "$OUTAGE_START" -eq 0 ]; then
-                  OUTAGE_START=$(date +%s)
-                  echo "=== Canary: outage detected at t=$((i-1))s ==="
-                fi
-              fi
-              if [ "$i" -gt "$DURATION" ]; then
-                # No outage at all after chaos duration → service was resilient, stop canary
-                if [ "$OUTAGE_START" -eq 0 ]; then break; fi
-                # Outage was detected AND recovered → stop canary
-                if [ "$OUTAGE_END" -ne 0 ]; then break; fi
-              fi
-              sleep 1
-            done
-            echo "$OUTAGE_START $OUTAGE_END" > /tmp/canary-outage-${EXP_NAME}.txt
-          ) &
-          CANARY_PID=$!
-
-          # --- 4. Wait for chaos duration ---
-          echo "=== Waiting ${DURATION}s for chaos ${EXP_NAME} ==="
-
-          # Background: poll for k6 summary as soon as k6 finishes writing it.
-          # k6 runs ~1m; chaos DURATION is 120s. The container would be long
-          # exited by the time we reach step 5, so extract early.
-          (
-            for i in $(seq 1 $(( DURATION + 120 ))); do
-              if kubectl exec "$K6_POD" -n "$NAMESPACE" -- test -f "/output/${EXP_NAME}.json" 2>/dev/null; then
-                kubectl exec "$K6_POD" -n "$NAMESPACE" -- cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null
-                echo "=== Extracted k6 summary for ${EXP_NAME} at t+${i}s ==="
-                break
-              fi
-              sleep 1
-            done
-          ) &
-          EXTRACT_PID=$!
-
-          sleep "${DURATION}"
-
-          # --- 5. Wait for k6 Job to complete, stream logs ---
-          echo "=== Waiting for k6 Job ${K6_JOB} to complete ==="
-          kubectl wait --for=condition=complete job/"${K6_JOB}" -n "$NAMESPACE" --timeout=120s 2>&1 || {
-            echo "=== WARNING: k6 Job did not complete in time — extracting anyway ==="
-          }
-
-          # Stream k6 logs
-          kubectl logs "$K6_POD" -n "$NAMESPACE" 2>&1 || true
-
-          # Wait for background extraction to finish
-          wait "${EXTRACT_PID}" 2>/dev/null || true
-
-          # If still missing, last-resort attempt
-          if [ ! -s "/tmp/chaos-results/${EXP_NAME}.json" ]; then
-            echo "=== WARNING: k6 summary still empty — last-resort extraction ==="
-            kubectl exec "$K6_POD" -n "$NAMESPACE" -- cat "/output/${EXP_NAME}.json" > "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || {
-              kubectl cp "${NAMESPACE}/${K6_POD}:/output/${EXP_NAME}.json" "/tmp/chaos-results/${EXP_NAME}.json" 2>/dev/null || \
-                echo "{}" > "/tmp/chaos-results/${EXP_NAME}.json"
-            }
-          fi
-
-          # Delete k6 Job
-          kubectl delete job "${K6_JOB}" -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
-          kubectl delete configmap "${K6_JOB}-scripts" "${K6_JOB}-env" \
-            -n "$NAMESPACE" --ignore-not-found 2>/dev/null || true
-
-          # --- 6. Wait for canary to finish and compute recovery ---
-          wait "${CANARY_PID}" 2>/dev/null || true
-          read -r OUTAGE_START OUTAGE_END < /tmp/canary-outage-${EXP_NAME}.txt 2>/dev/null || true
-          OUTAGE_START=${OUTAGE_START:-0}
-          OUTAGE_END=${OUTAGE_END:-0}
-          if [ "$OUTAGE_START" = "0" ]; then RECOVERY_SEC=0; else
-            if [ "$OUTAGE_END" = "0" ]; then RECOVERY_SEC=-1; else
-              RECOVERY_SEC=$(( OUTAGE_END - OUTAGE_START ))
+            # Apply filter if set
+            if [ -n "$FILTER" ]; then
+              MATCH=0
+              IFS=',' read -ra PARTS <<< "$FILTER"
+              for f in "${PARTS[@]}"; do
+                f="$(echo "$f" | xargs)"
+                if [ "$NAME" = "$f" ]; then MATCH=1; break; fi
+              done
+              if [ "$MATCH" -eq 0 ]; then echo "=== Skipping $NAME (not in filter) ==="; continue; fi
             fi
-          fi
-          echo "Recovery time: ${RECOVERY_SEC}s"
 
-          # Cleanup chaos immediately so the next experiment starts clean
-          echo "=== Cleaning up ${EXP_NAME} ==="
-          kubectl delete -f "${MANIFEST}" --ignore-not-found --wait=false 2>/dev/null || true
-
-          # Write recovery time
-          RECOVERY_SEC=${RECOVERY_SEC:--1}
-          echo "${EXP_NAME}: ${RECOVERY_SEC}s" >> /tmp/chaos-recovery-times.txt
-          RUNNER
-
-          chmod +x /tmp/run-chaos-experiment.sh
+            echo "=== Running chaos: $NAME (type=$TYPE) ==="
+            if timeout $(( CHAOS_DURATION + 420 )) bash /tmp/ct-common/scripts/chaos-experiment-runner.sh \
+              "$FILE" "$NAME" "${{ env.CHAOS_DURATION }}" "${{ env.SERVICE_NAME }}" \
+              /tmp/k6-env.txt perf; then
+              :
+            else
+              RC=$?
+              if [ "$RC" -eq 124 ] || [ "$RC" -eq 137 ]; then
+                echo "=== TIMEOUT: $NAME hung ==="
+                echo "${NAME}: -1s" >> /tmp/chaos-recovery-times.txt
+              else
+                echo "=== WARNING: $NAME exited code $RC ==="
+              fi
+            fi
+          done
 
       - name: Port-forward to AKS (persistent)
         run: |
