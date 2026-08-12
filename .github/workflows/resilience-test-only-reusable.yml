@@ -203,6 +203,8 @@ jobs:
       # =============================================================
       - name: Consolidate chaos results
         run: |
+          set +e  # prevent jq failures from killing the step
+
           # Build recovery JSON from collected times
           RECOVERY_JSON="{"
           FIRST=true
@@ -219,25 +221,23 @@ jobs:
           echo "=== Recovery times ==="
           cat /tmp/chaos-recovery.json
 
-          # Merge per-experiment k6 summary exports into one NDJSON file
+          # Merge per-experiment summary JSONs into NDJSON for downstream consumers
           if ls /tmp/chaos-results/*.json 2>/dev/null; then
             for f in /tmp/chaos-results/*.json; do
-              [ -s "$f" ] && jq -c '.metrics | to_entries[] | {type: "Metric", metric: .key, data: {values: .value.values}}' "$f"
-            done > chaos-results.json 2>/dev/null || true
+              [ -s "$f" ] && jq -c '.metrics | to_entries[]? | {type: "Metric", metric: .key, data: {values: (.value.values // {})}}' "$f" 2>/dev/null || true
+            done > chaos-results.json 2>/dev/null
           fi
+          [ ! -s chaos-results.json ] && echo '[]' > chaos-results.json
 
-          # Network-delay observation: compare chaos p95 vs baseline p95.
-          # If NetworkChaos added < 10ms to p95, warn (port-forward bypasses overlay).
-          if [ -f baseline-before-chaos.json ] && ls /tmp/chaos-results/network-delay.json 2>/dev/null; then
+          # Network-delay observation
+          if [ -f baseline-before-chaos.json ] && [ -f /tmp/chaos-results/network-delay.json ]; then
             BL_P95=$(jq -r '.metrics.http_req_duration.values | ."p(95)" // 0' baseline-before-chaos.json 2>/dev/null || echo 0)
             ND_P95=$(jq -r '.metrics.http_req_duration.values | ."p(95)" // 0' /tmp/chaos-results/network-delay.json 2>/dev/null || echo 0)
             DIFF=$(( ND_P95 - BL_P95 ))
             if [ "$DIFF" -lt 10 ] 2>/dev/null; then
-              echo "=== WARNING: network-delay experiment had no observable effect (p95 diff=${DIFF}ms)."
-              echo "=== k6 runs in-cluster now; delay injection should reach the Service."
-              echo "=== Check Chaos Mesh NetworkChaos configuration and selector labels."
+              echo "=== WARNING: network-delay had no observable effect (p95 diff=${DIFF}ms) ==="
             else
-              echo "=== OK: network-delay added ${DIFF}ms to p95."
+              echo "=== OK: network-delay added ${DIFF}ms to p95 ==="
             fi
           fi
 
