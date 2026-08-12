@@ -161,42 +161,6 @@ jobs:
           echo "ERROR: ArgoCD server did not become ready after 5 minutes" >&2
           exit 1
 
-      - name: Ensure Application exists
-        run: |
-          if kubectl get application ${{ env.SERVICE_NAME }} -n argocd &>/dev/null; then
-            echo "Application '${{ env.SERVICE_NAME }}' already exists"
-          else
-            echo "Creating ArgoCD Application for ${{ env.SERVICE_NAME }}..."
-            cat <<APPEOF | kubectl apply -f -
-            apiVersion: argoproj.io/v1alpha1
-            kind: Application
-            metadata:
-              name: ${{ env.SERVICE_NAME }}
-              namespace: argocd
-              finalizers:
-                - resources-finalizer.argocd.argoproj.io
-            spec:
-              project: default
-              source:
-                repoURL: https://github.com/Dorigao-LTDA/central-gitops.git
-                targetRevision: main
-                path: deploy/helm/service-chart
-                helm:
-                  valueFiles:
-                    - ../../values/${{ env.SERVICE_NAME }}.yaml
-              destination:
-                server: https://kubernetes.default.svc
-                namespace: app
-              syncPolicy:
-                automated:
-                  prune: true
-                  selfHeal: true
-                syncOptions:
-                  - CreateNamespace=true
-            APPEOF
-            echo "Application created"
-          fi
-
       - name: Wait for Application
         run: |
           echo "Waiting for ArgoCD Application '${{ env.SERVICE_NAME }}' to exist..."
