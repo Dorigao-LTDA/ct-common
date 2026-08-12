@@ -137,10 +137,6 @@ jobs:
     needs: [performance-test]
     runs-on: ubuntu-latest
     if: always()
-    permissions:
-      id-token: write
-      contents: read
-      pull-requests: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -204,23 +200,24 @@ jobs:
             --output insights-input.json
 
       - name: Analyze with LLM
-        env:
-          LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
-          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}
-          LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
         run: |
           pip install -q openai 2>/dev/null || pip install openai
-          if [ -n "$LLM_API_KEY" ]; then
-            echo "Using configured LLM_API_KEY for auth"
+
+          # Auth: prefer configured key, fallback to OIDC token via Azure CLI
+          if [ -n "${LLM_API_KEY:-}" ]; then
+            export LLM_API_KEY="${LLM_API_KEY}"
+            echo "Using configured LLM_API_KEY"
           else
             TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv 2>/dev/null || echo "")
             if [ -n "$TOKEN" ]; then
               export LLM_API_KEY="$TOKEN"
               echo "Using OIDC token for auth"
-            else
-              echo "WARNING: No LLM auth available"
             fi
           fi
+
+          export LLM_ENDPOINT="${LLM_ENDPOINT:-}"
+          export LLM_DEPLOYMENT="${LLM_DEPLOYMENT:-DeepSeek-V4-Flash}"
+
           python3 /tmp/ct-common/scripts/insights/analyze.py \
             --input insights-input.json \
             --output insights-llm-response.json
