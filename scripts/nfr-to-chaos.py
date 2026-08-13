@@ -97,16 +97,16 @@ def gen_manifest(exp, service):
         manifest['spec']['patterns'] = exp.get('patterns', ['*'])
 
     elif kind == 'HTTPChaos':
-        manifest['spec']['action'] = exp.get('action', 'abort')
+        # ponytail: HTTPChaos has NO 'action' field. It uses 'target' (Request/Response)
+        # plus specific fault fields (abort/delay/patch). Abort = return error to client.
+        action = exp.get('action', 'abort')
         manifest['spec']['target'] = 'Request'
-        manifest['spec']['abort'] = True
-        manifest['spec']['selector'] = {
-            'namespaces': ['app'],
-            'labelSelectors': {'app': service},
-        }
-        # HTTPChaos requires a target: Request/Response and port
         manifest['spec']['port'] = exp.get('port', 8080)
         manifest['spec']['path'] = exp.get('path', '*')
+        if action == 'delay':
+            manifest['spec']['delay'] = exp.get('delay', '100ms')
+        else:  # abort (default)
+            manifest['spec']['abort'] = True
 
     else:
         raise ValueError(
