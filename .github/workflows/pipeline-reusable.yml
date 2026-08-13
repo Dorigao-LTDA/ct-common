@@ -784,7 +784,7 @@ jobs:
       - name: Analyze with LLM
         env:
           LLM_ENDPOINT: ${{ vars.LLM_ENDPOINT }}
-          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}
+          LLM_DEPLOYMENT: ${{ vars.LLM_DEPLOYMENT || 'gpt-5.6-terra' }}
           LLM_API_KEY: ${{ secrets.LLM_API_KEY || '' }}
         run: |
           pip install -q openai 2>/dev/null || pip install openai

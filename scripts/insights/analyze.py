@@ -139,9 +139,9 @@ def build_prompts(data, role, instructions):
     """Build system + user message list for a given analysis role."""
     sys_msg = SYSTEM_PROMPT
     user_msg = f'Role: {role}\n\nInstructions: {instructions}\n\n'
-    # ponytail: GlobalStandard deployment caps at ~1000 TPM (see rateLimits).
-    # Keep each prompt under ~6KB so 3 sequential calls fit a low token quota.
-    user_msg += json.dumps(data, indent=2)[:6000]
+    # ponytail: gpt-5.6-terra has 500K TPM — full context (test metrics +
+    # observability + full Java source) fits comfortably in one request.
+    user_msg += json.dumps(data, indent=2)[:40000]
     return [
         {'role': 'system', 'content': sys_msg},
         {'role': 'user', 'content': user_msg},
@@ -181,7 +181,7 @@ def main():
     # Read env
     base_url = os.environ.get('LLM_ENDPOINT', '')
     api_key = os.environ.get('LLM_API_KEY', '')
-    deployment = os.environ.get('LLM_DEPLOYMENT', 'DeepSeek-V4-Flash')
+    deployment = os.environ.get('LLM_DEPLOYMENT', 'gpt-5.6-terra')
 
     if not base_url:
         fallback = {
@@ -252,7 +252,7 @@ def main():
     synth_messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
         {'role': 'user', 'content': synth_prompt},
-        {'role': 'user', 'content': json.dumps(synthesis_context, indent=2)[:6000]},
+        {'role': 'user', 'content': json.dumps(synthesis_context, indent=2)[:30000]},
     ]
     synth_result = call_llm(synth_messages, base_url, api_key, deployment, args.timeout)
 

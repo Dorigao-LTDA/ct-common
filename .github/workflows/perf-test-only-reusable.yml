@@ -216,7 +216,7 @@ jobs:
           fi
 
           export LLM_ENDPOINT="${{ vars.LLM_ENDPOINT }}"
-          export LLM_DEPLOYMENT="${{ vars.LLM_DEPLOYMENT || 'DeepSeek-V4-Flash' }}"
+          export LLM_DEPLOYMENT="${{ vars.LLM_DEPLOYMENT || 'gpt-5.6-terra' }}"
 
           python3 /tmp/ct-common/scripts/insights/analyze.py \
             --input insights-input.json \
