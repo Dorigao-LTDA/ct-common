@@ -182,6 +182,13 @@ jobs:
             -p '{"operation":{"sync":{"revision":"${{ github.sha }}"}}}' \
             --type=merge
 
+      - name: Restart deployment (force fresh image pull)
+        run: |
+          # ponytail: :latest tag doesn't trigger ArgoCD rollout on re-push.
+          # Force a restart so pods re-pull the fresh image from ACR.
+          sleep 30
+          kubectl rollout restart deployment/${{ env.SERVICE_NAME }} -n app 2>/dev/null || true
+
       - name: Wait for Rollout
         run: |
           kubectl rollout status deployment/${{ env.SERVICE_NAME }} -n app --timeout=300s
