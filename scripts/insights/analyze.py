@@ -100,10 +100,11 @@ def call_llm(messages, base_url, api_key, deployment, timeout=60, retries=3):
         try:
             # ponytail: gpt-5.6-terra (new OpenAI API) rejects max_tokens in favor
             # of max_completion_tokens, and reasoning models reject temperature.
+            # Reasoning models spend tokens "thinking" — 4000 leaves room for output.
             completion = client.chat.completions.create(
                 model=deployment,
                 messages=messages,
-                max_completion_tokens=2000,
+                max_completion_tokens=4000,
                 response_format={'type': 'json_object'},
                 timeout=timeout,
             )
