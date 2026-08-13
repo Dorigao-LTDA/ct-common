@@ -9,7 +9,7 @@ Usage: python3 scripts/nfr-to-chaos.py --nfr nfr.yaml --service <name> --output-
 Output per experiment: <output-dir>/<short-name>.yaml (Chaos Mesh manifest)
                      + <output-dir>/manifest-list.json (list for pipeline iteration)
 
-Supported chaos types: PodChaos, NetworkChaos, StressChaos
+Supported chaos types: PodChaos, NetworkChaos, StressChaos, IOChaos, DNSChaos, HTTPChaos
 """
 import argparse
 import json
@@ -85,10 +85,33 @@ def gen_manifest(exp, service):
             }
         manifest['spec']['stressors'] = stressors
 
+    elif kind == 'IOChaos':
+        manifest['spec']['action'] = exp.get('action', 'latency')
+        manifest['spec']['volumePath'] = exp.get('volume_path', '/data')
+        manifest['spec']['path'] = exp.get('path', '/data/**')
+        manifest['spec']['delay'] = exp.get('delay', '50ms')
+        manifest['spec']['percent'] = exp.get('percent', 100)
+
+    elif kind == 'DNSChaos':
+        manifest['spec']['action'] = exp.get('action', 'error')
+        manifest['spec']['patterns'] = exp.get('patterns', ['*'])
+
+    elif kind == 'HTTPChaos':
+        manifest['spec']['action'] = exp.get('action', 'abort')
+        manifest['spec']['target'] = 'Request'
+        manifest['spec']['abort'] = True
+        manifest['spec']['selector'] = {
+            'namespaces': ['app'],
+            'labelSelectors': {'app': service},
+        }
+        # HTTPChaos requires a target: Request/Response and port
+        manifest['spec']['port'] = exp.get('port', 8080)
+        manifest['spec']['path'] = exp.get('path', '*')
+
     else:
         raise ValueError(
             f'Unsupported chaos type "{kind}" for experiment "{name}". '
-            f'Supported: PodChaos, NetworkChaos, StressChaos'
+            f'Supported: PodChaos, NetworkChaos, StressChaos, IOChaos, DNSChaos, HTTPChaos'
         )
 
     return manifest
