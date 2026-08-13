@@ -109,9 +109,10 @@ def call_llm(messages, base_url, api_key, deployment, timeout=60, retries=3):
             break  # success
         except Exception as e:
             last_error = e
-            # ponytail: retry only on rate-limit (429); backoff 2^attempt * 5s.
+            # ponytail: retry only on rate-limit (429); backoff 30s/60s/120s spans
+            # the TPM reset window. DeepSeek quota is per-minute.
             if '429' in str(e) or 'RateLimit' in str(e):
-                wait = 5 * (2 ** attempt)
+                wait = 30 * (2 ** attempt)
                 print(f'analyze: rate limited (attempt {attempt+1}/{retries}), retrying in {wait}s',
                       file=sys.stderr)
                 time.sleep(wait)
@@ -205,13 +206,19 @@ def main():
         return
 
     # ---- Call 1: Performance Analyst ----
+    # ponytail: strip full_source for perf/resil analysts (they only need metrics).
+    # Only the synthesis call gets the full app code, halving total token usage.
+    data_lite = json.loads(json.dumps(data))
+    if 'code_changes' in data_lite and 'full_source' in data_lite['code_changes']:
+        del data_lite['code_changes']['full_source']
+
     perf_prompt = (
         'Analyze the performance test results (k6 metrics) and observability data (Mimir, Loki). '
         'Identify: (a) which gates failed or are close to failing, '
         '(b) root causes from observability correlation, '
         '(c) concrete recommendations with file paths and values.'
     )
-    perf_messages = build_prompts(data, 'Performance Analyst', perf_prompt)
+    perf_messages = build_prompts(data_lite, 'Performance Analyst', perf_prompt)
     perf_result = call_llm(perf_messages, base_url, api_key, deployment, args.timeout)
 
     # ---- Call 2: Resilience Analyst ----
@@ -221,7 +228,7 @@ def main():
         '(b) patterns in error logs during experiments, '
         '(c) recommendations to improve recovery time or resilience configuration.'
     )
-    resil_messages = build_prompts(data, 'Resilience Analyst', resil_prompt)
+    resil_messages = build_prompts(data_lite, 'Resilience Analyst', resil_prompt)
     resil_result = call_llm(resil_messages, base_url, api_key, deployment, args.timeout)
 
     # ---- Call 3: Synthesis (Tech Lead) ----
