@@ -122,8 +122,9 @@ LOG_KILLER=$!
 
 # Poll for summary file. handleSummary() writes it at test end; container stays
 # alive ~30s during gracefulStop — extract it while we can.
-# ponytail: sh -c + timeout 5 — 'test' is a shell built-in (not a binary
-# in grafana/k6 image), and per-call deadline prevents hangs on exited containers.
+# ponytail: sh -c + timeout 15 — 'test' is a shell built-in (not a binary
+# in grafana/k6 image). 15s is enough for kubectl exec connection setup; the
+# earlier 5s deadline was killing exec before the API server responded.
 # Time-based loop ensures we respect $TIMEOUT regardless of kubectl call latency.
 EXTRACTED=false
 START_TS=$(date +%s)
@@ -134,8 +135,8 @@ while true; do
     break
   fi
   # Extract summary JSON (handleSummary writes it only at test end)
-  if timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
-    timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
+  if timeout 15 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
+    timeout 15 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null && {
       EXTRACTED=true
       echo "=== k6-job-runner: extracted ${SUMMARY_FILE} at t+${ELAPSED}s ==="
     }
@@ -153,8 +154,8 @@ kill "$LOG_KILLER" 2>/dev/null || true
 # ------------------------------------------------------------------
 if ! $EXTRACTED; then
   echo "=== k6-job-runner: late extraction attempt for ${SUMMARY_FILE} ==="
-  timeout 5 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
-    timeout 5 kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
+  timeout 15 kubectl exec "$POD_NAME" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "./${SUMMARY_FILE}" 2>/dev/null || {
+    timeout 15 kubectl cp "${NAMESPACE}/${POD_NAME}:/output/${SUMMARY_FILE}" "./${SUMMARY_FILE}" 2>/dev/null || {
       echo "=== k6-job-runner: WARNING: could not extract summary — file may be empty ==="
       touch "./${SUMMARY_FILE}"
     }
