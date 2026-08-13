@@ -73,10 +73,11 @@ hypothesis, recommendation
 Return ONLY the JSON object, no markdown fences, no extra text."""
 
 
-def call_llm(messages, base_url, api_key, deployment, timeout=60):
+def call_llm(messages, base_url, api_key, deployment, timeout=60, retries=3):
     """
     Make one LLM chat completion call via OpenAI-compatible API (Azure AI Foundry).
     Returns parsed JSON response dict or dict with 'error' key.
+    Retries on 429 (rate limit) with exponential backoff.
     """
     if OpenAI is None:
         return {'error': 'openai library not installed. Run: pip install openai'}
@@ -94,17 +95,30 @@ def call_llm(messages, base_url, api_key, deployment, timeout=60):
     except Exception as e:
         return {'error': f'failed to create OpenAI client: {e}'}
 
-    try:
-        completion = client.chat.completions.create(
-            model=deployment,
-            messages=messages,
-            temperature=0.1,
-            max_tokens=2000,
-            response_format={'type': 'json_object'},
-            timeout=timeout,
-        )
-    except Exception as e:
-        return {'error': f'API call failed: {e}'}
+    last_error = None
+    for attempt in range(retries):
+        try:
+            completion = client.chat.completions.create(
+                model=deployment,
+                messages=messages,
+                temperature=0.1,
+                max_tokens=2000,
+                response_format={'type': 'json_object'},
+                timeout=timeout,
+            )
+            break  # success
+        except Exception as e:
+            last_error = e
+            # ponytail: retry only on rate-limit (429); backoff 2^attempt * 5s.
+            if '429' in str(e) or 'RateLimit' in str(e):
+                wait = 5 * (2 ** attempt)
+                print(f'analyze: rate limited (attempt {attempt+1}/{retries}), retrying in {wait}s',
+                      file=sys.stderr)
+                time.sleep(wait)
+                continue
+            return {'error': f'API call failed: {e}'}
+    else:
+        return {'error': f'API call failed after {retries} retries: {last_error}'}
 
     choices = completion.choices
     if not choices:
