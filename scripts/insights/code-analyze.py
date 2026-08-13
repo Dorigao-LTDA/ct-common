@@ -162,6 +162,19 @@ def main():
     full_diff, _ = git(args.repo_path, 'diff', '--unified=3', args.base_ref, 'HEAD')
     output['diff_truncated'] = full_diff[:10000] if full_diff else ''
 
+    # --- Full application source code (for LLM root-cause analysis) ---
+    output['full_source'] = {}
+    source_files, _ = git(args.repo_path, 'ls-files',
+                          'src/main/java/', 'src/main/resources/',
+                          'pom.xml', 'nfr.yaml', 'deploy/values.yaml')
+    for f in [x.strip() for x in source_files.split('\n') if x.strip()]:
+        if f.endswith(('.java', '.xml', '.yaml', '.yml', '.properties')):
+            content, _ = git(args.repo_path, 'show', f'HEAD:{f}')
+            if content:
+                # ponytail: per-file cap to keep total input bounded.
+                # Java service ~30 files × ~4KB avg = ~120KB → LLM context OK.
+                output['full_source'][f] = content[:4000]
+
     # Endpoints from Java files
     output['changed_endpoints'] = []
     java_files = [f for f in changed_files

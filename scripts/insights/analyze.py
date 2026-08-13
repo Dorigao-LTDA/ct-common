@@ -124,7 +124,9 @@ def build_prompts(data, role, instructions):
     """Build system + user message list for a given analysis role."""
     sys_msg = SYSTEM_PROMPT
     user_msg = f'Role: {role}\n\nInstructions: {instructions}\n\n'
-    user_msg += json.dumps(data, indent=2)[:8000]  # token budget
+    # ponytail: full_source (app code) can be large; DeepSeek handles big context.
+    # 40000 chars covers test metrics + observability + full Java service source.
+    user_msg += json.dumps(data, indent=2)[:40000]
     return [
         {'role': 'system', 'content': sys_msg},
         {'role': 'user', 'content': user_msg},
@@ -225,7 +227,7 @@ def main():
     synth_messages = [
         {'role': 'system', 'content': SYSTEM_PROMPT},
         {'role': 'user', 'content': synth_prompt},
-        {'role': 'user', 'content': json.dumps(synthesis_context, indent=2)[:6000]},
+        {'role': 'user', 'content': json.dumps(synthesis_context, indent=2)[:30000]},
     ]
     synth_result = call_llm(synth_messages, base_url, api_key, deployment, args.timeout)
 

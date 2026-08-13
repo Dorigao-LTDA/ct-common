@@ -707,10 +707,10 @@ jobs:
         id: o11y
         continue-on-error: true
         run: |
-          kubectl port-forward -n observability svc/mimir-gateway 9090:8080 &
+          kubectl port-forward -n observability svc/mimir-gateway 9090:80 &
           kubectl port-forward -n observability svc/loki 3100:3100 &
-          kubectl port-forward -n observability svc/tempo 3200:3100 &
-          sleep 5
+          kubectl port-forward -n observability svc/tempo 3200:3200 &
+          sleep 8
           python3 /tmp/ct-common/scripts/insights/o11y-collect.py \
             --mimir-url http://localhost:9090/prometheus \
             --loki-url http://localhost:3100 \
