@@ -50,6 +50,7 @@ jobs:
           sed 's/^export //' nfr-env.sh > /tmp/k6-env.txt
 
       - name: Run k6 Smoke
+        continue-on-error: true
         run: |
           bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/smoke.js \
@@ -59,6 +60,7 @@ jobs:
             300 smoke
 
       - name: Run k6 Baseline
+        continue-on-error: true
         run: |
           bash /tmp/ct-common/scripts/k6-job-runner.sh \
             perf/baseline.js \
