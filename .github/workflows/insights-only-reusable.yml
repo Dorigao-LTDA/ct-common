@@ -1,0 +1,159 @@
+name: Insights Only (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      service_name:
+        description: 'Nome do microserviço (catalogo, pagamento, pedido)'
+        required: true
+        type: string
+      source_run_id:
+        description: 'Run ID da pipeline de onde baixar os artifacts (vazio = última run)'
+        required: false
+        type: string
+        default: ''
+
+env:
+  SERVICE_NAME: ${{ inputs.service_name }}
+
+jobs:
+  insights:
+    name: Insights Only
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Clone shared toolkit
+        run: git clone --depth 1 https://github.com/Dorigao-LTDA/ct-common.git /tmp/ct-common
+
+      - name: Download artifacts from previous run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SOURCE_RUN: ${{ inputs.source_run_id }}
+        run: |
+          # If no run_id given, use the latest completed run
+          if [ -z "$SOURCE_RUN" ]; then
+            SOURCE_RUN=$(gh run list --repo ${{ github.repository }} \
+              --workflow "CI/CD Pipeline" --status completed --limit 1 \
+              --json databaseId --jq '.[0].databaseId')
+            echo "Using latest run: $SOURCE_RUN"
+          else
+            echo "Using provided run: $SOURCE_RUN"
+          fi
+
+          # Download smoke/baseline results + gate-summary from that run
+          mkdir -p artifacts
+          gh run download "$SOURCE_RUN" \
+            --repo ${{ github.repository }} \
+            --dir artifacts \
+            --name perf-results 2>/dev/null || echo "no perf-results"
+          gh run download "$SOURCE_RUN" \
+            --repo ${{ github.repository }} \
+            --dir artifacts \
+            --name smoke-results 2>/dev/null || echo "no smoke-results"
+          gh run download "$SOURCE_RUN" \
+            --repo ${{ github.repository }} \
+            --dir artifacts \
+            --name gate-summary 2>/dev/null || echo "no gate-summary"
+          gh run download "$SOURCE_RUN" \
+            --repo ${{ github.repository }} \
+            --dir artifacts \
+            --name chaos-results 2>/dev/null || echo "no chaos-results"
+
+          # Flatten nested artifact dirs into ./ (collect.py expects files at root or named subdirs)
+          find artifacts -type f \( -name "*-results.json" -o -name "gate-summary.json" -o -name "chaos-recovery.json" \) \
+            -exec cp {} . \; 2>/dev/null || true
+          ls -la *.json 2>/dev/null || echo "no json artifacts found"
+
+      - name: Analyze code changes
+        continue-on-error: true
+        run: |
+          BASE=$(git merge-base HEAD~1 HEAD 2>/dev/null || echo "HEAD~1")
+          python3 /tmp/ct-common/scripts/insights/code-analyze.py \
+            --repo-path . \
+            --base-ref "$BASE" \
+            --service ${{ inputs.service_name }} \
+            --output insights-input-code.json
+
+      - name: Azure Login (for LLM OIDC token)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Set AKS Context
+        uses: azure/aks-set-context@v3
+        with:
+          resource-group: ${{ secrets.AKS_RESOURCE_GROUP }}
+          cluster-name: ${{ secrets.AKS_CLUSTER_NAME }}
+
+      - name: Collect observability data
+        id: o11y
+        continue-on-error: true
+        run: |
+          kubectl port-forward -n observability svc/mimir-gateway 9090:80 &
+          kubectl port-forward -n observability svc/loki 3100:3100 &
+          kubectl port-forward -n observability svc/tempo 3200:3200 &
+          sleep 8
+          python3 /tmp/ct-common/scripts/insights/o11y-collect.py \
+            --mimir-url http://localhost:9090/prometheus \
+            --loki-url http://localhost:3100 \
+            --tempo-url http://localhost:3200 \
+            --service ${{ inputs.service_name }} \
+            --test-window "$(date -u -d '60 minutes ago' +%Y-%m-%dT%H:%M:%SZ)/$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            --output insights-input-o11y.json
+          kill %1 %2 %3 2>/dev/null || true
+
+      - name: Collect test data
+        run: |
+          python3 /tmp/ct-common/scripts/insights/collect.py \
+            --artifacts-dir . \
+            --nfr nfr.yaml \
+            --service ${{ inputs.service_name }} \
+            --commit ${{ github.sha }} \
+            --o11y-input insights-input-o11y.json \
+            --code-input insights-input-code.json \
+            --output insights-input.json
+
+      - name: Analyze with LLM
+        run: |
+          pip install -q openai 2>/dev/null || pip install openai
+          if [ -n "${LLM_API_KEY:-}" ]; then
+            export LLM_API_KEY="${LLM_API_KEY}"
+            echo "Using configured LLM_API_KEY"
+          else
+            TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv 2>/dev/null || echo "")
+            if [ -n "$TOKEN" ]; then
+              export LLM_API_KEY="$TOKEN"
+              echo "Using OIDC token for auth"
+            fi
+          fi
+          export LLM_ENDPOINT="${{ vars.LLM_ENDPOINT }}"
+          export LLM_DEPLOYMENT="${{ vars.LLM_DEPLOYMENT || 'gpt-5.6-terra' }}"
+          python3 /tmp/ct-common/scripts/insights/analyze.py \
+            --input insights-input.json \
+            --output insights-llm-response.json
+
+      - name: Generate report
+        if: always()
+        run: |
+          python3 /tmp/ct-common/scripts/insights/report.py \
+            --test-data insights-input.json \
+            --llm-response insights-llm-response.json \
+            --output insights-report.md
+
+      - name: Upload report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: insights-report-${{ inputs.service_name }}
+          path: |
+            insights-report.md
+            insights-report.json
+            insights-input.json
