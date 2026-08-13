@@ -22,16 +22,12 @@ K6_ENV_FILE="${5:?}"
 K6_SCRIPT_DIR="${6:?}"
 NAMESPACE="app"
 
-CT_COMMON_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NDJSON_CONVERTER="${CT_COMMON_DIR}/scripts/ndjson-to-summary.py"
-
 mkdir -p /tmp/chaos-results
 
 # ------------------------------------------------------------------
-# 1. Create k6 Job for chaos-traffic.js (--out json NDJSON)
+# 1. Create k6 Job for chaos-traffic.js (handleSummary writes summary JSON)
 # ------------------------------------------------------------------
 K6_JOB="k6-chaos-${EXP_NAME}-$(date +%s)"
-RAW_FILE="raw-${EXP_NAME}.ndjson"
 SUMMARY_FILE="${EXP_NAME}.json"
 
 echo "=== chaos-runner: creating k6 Job ${K6_JOB} ==="
@@ -40,8 +36,8 @@ kubectl create configmap "${K6_JOB}-scripts" \
 kubectl create configmap "${K6_JOB}-env" \
   --from-env-file="$K6_ENV_FILE" -n "$NAMESPACE" 2>&1
 
-# ponytail: --out json (NDJSON) replaces deprecated --summary-export.
-# Post-processing via ndjson-to-summary.py converts to summary JSON.
+# ponytail: chaos-traffic.js uses handleSummary() to write summary JSON at test end.
+# K6_SUMMARY_FILE env var tells it the output path.
 cat <<JOBEOF | kubectl apply -f -
 apiVersion: batch/v1
 kind: Job
@@ -60,9 +56,11 @@ spec:
       - name: k6
         image: grafana/k6:latest
         command: ["k6", "run", "/scripts/chaos-traffic.js",
-          "--out", "json=/output/${RAW_FILE}",
           "--tag", "test_type=chaos",
           "--tag", "chaos_experiment=${EXP_NAME}"]
+        env:
+        - name: K6_SUMMARY_FILE
+          value: "/output/${SUMMARY_FILE}"
         envFrom:
         - configMapRef:
             name: "${K6_JOB}-env"
@@ -135,12 +133,10 @@ echo "=== chaos-runner: waiting ${DURATION}s for chaos ==="
   while true; do
     ELAPSED=$(($(date +%s) - START_TS))
     if [ "$ELAPSED" -ge $(( DURATION + 120 )) ]; then break; fi
-    if timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "test -f /output/${RAW_FILE}" 2>/dev/null; then
-      timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "cat /output/${RAW_FILE}" > "/tmp/chaos-results/${RAW_FILE}" 2>/dev/null && {
-        python3 "$NDJSON_CONVERTER" --input "/tmp/chaos-results/${RAW_FILE}" --output "/tmp/chaos-results/${SUMMARY_FILE}" 2>/dev/null && {
-          echo "=== chaos-runner: extracted+converted ${SUMMARY_FILE} at t+${ELAPSED}s ==="
-          EXTRACTED=true
-        }
+    if timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "test -f /output/${SUMMARY_FILE}" 2>/dev/null; then
+      timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "/tmp/chaos-results/${SUMMARY_FILE}" 2>/dev/null && {
+        echo "=== chaos-runner: extracted ${SUMMARY_FILE} at t+${ELAPSED}s ==="
+        EXTRACTED=true
       }
       break
     fi
@@ -163,9 +159,8 @@ wait "${EXTRACT_PID}" 2>/dev/null || true
 # Late extraction if still missing
 if [ ! -s "/tmp/chaos-results/${SUMMARY_FILE}" ]; then
   echo "=== chaos-runner: late extraction attempt ==="
-  timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "cat /output/${RAW_FILE}" > "/tmp/chaos-results/${RAW_FILE}" 2>/dev/null || \
-    timeout 5 kubectl cp "${NAMESPACE}/${K6_POD}:/output/${RAW_FILE}" "/tmp/chaos-results/${RAW_FILE}" 2>/dev/null || true
-  python3 "$NDJSON_CONVERTER" --input "/tmp/chaos-results/${RAW_FILE}" --output "/tmp/chaos-results/${SUMMARY_FILE}" 2>/dev/null || \
+  timeout 5 kubectl exec "$K6_POD" -n "$NAMESPACE" -- sh -c "cat /output/${SUMMARY_FILE}" > "/tmp/chaos-results/${SUMMARY_FILE}" 2>/dev/null || \
+    timeout 5 kubectl cp "${NAMESPACE}/${K6_POD}:/output/${SUMMARY_FILE}" "/tmp/chaos-results/${SUMMARY_FILE}" 2>/dev/null || \
     echo '{"metrics":{}}' > "/tmp/chaos-results/${SUMMARY_FILE}"
 fi
 
