@@ -55,9 +55,7 @@ spec:
       containers:
       - name: k6
         image: grafana/k6:latest
-        command: ["k6", "run", "/scripts/chaos-traffic.js",
-          "--tag", "test_type=chaos",
-          "--tag", "chaos_experiment=${EXP_NAME}"]
+        command: ["sh", "-c", "k6 run /scripts/chaos-traffic.js --tag test_type=chaos --tag chaos_experiment=${EXP_NAME}; sleep 30"]
         env:
         - name: K6_SUMMARY_FILE
           value: "/output/${SUMMARY_FILE}"
