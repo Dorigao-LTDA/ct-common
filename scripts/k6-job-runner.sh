@@ -48,10 +48,13 @@ kubectl create configmap "${JOB_NAME}-env" \
 # ponytail: --summary-export removed in k6 v0.48+; --out json writes NDJSON
 # INCREMENTALLY (runner extracted partial file at t+0). Correct approach:
 # handleSummary() in the k6 script writes the full aggregated summary at test end.
+# The trailing `sleep 30` keeps the container alive after handleSummary so the
+# runner can extract the file before the pod enters Completed state.
 k6_cmd="k6 run /scripts/${SCRIPT_BASENAME}"
 if [ -n "$TAG" ]; then
   k6_cmd="${k6_cmd} --tag test_type=${TAG}"
 fi
+k6_cmd="${k6_cmd}; sleep 30"
 echo "=== k6-job-runner: cmd=${k6_cmd} ==="
 
 cat <<EOF | kubectl apply -f -
