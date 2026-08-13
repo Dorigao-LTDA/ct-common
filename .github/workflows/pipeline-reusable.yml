@@ -651,12 +651,55 @@ jobs:
             --nfr nfr.yaml \
             --service ${{ env.SERVICE_NAME }}
 
+      - name: Azure Login (for Blob run comparison)
+        uses: azure/login@v2
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Download previous run
+        continue-on-error: true
+        run: |
+          az storage blob download \
+            --container-name gate-results \
+            --name "${{ env.SERVICE_NAME }}/latest.json" \
+            --file /tmp/previous-summary.json \
+            --account-name stctframeworkhist \
+            --auth-mode login 2>/dev/null || echo "No previous run found"
+
+      - name: Compare with previous run
+        run: |
+          python3 /tmp/ct-common/scripts/compare-runs.py \
+            --current gate-summary.json \
+            --previous /tmp/previous-summary.json \
+            --output regression-summary.json || true
+
+      - name: Upload current run to Blob
+        if: always()
+        run: |
+          TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
+          az storage blob upload \
+            --container-name gate-results \
+            --name "${{ env.SERVICE_NAME }}/${TIMESTAMP}.json" \
+            --file gate-summary.json \
+            --account-name stctframeworkhist \
+            --auth-mode login 2>/dev/null || true
+          az storage blob upload \
+            --container-name gate-results \
+            --name "${{ env.SERVICE_NAME }}/latest.json" \
+            --file gate-summary.json \
+            --account-name stctframeworkhist \
+            --auth-mode login 2>/dev/null || true
+
       - name: Upload Gate Summary
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: gate-summary
-          path: gate-summary.json
+          path: |
+            gate-summary.json
+            regression-summary.json
 
   # =============================================
   # Stage 8: LLM Insights & Developer Report
