@@ -674,6 +674,7 @@ jobs:
             --service ${{ env.SERVICE_NAME }}
 
       - name: Download previous run
+        if: always()
         continue-on-error: true
         run: |
           az storage blob download \
@@ -684,6 +685,7 @@ jobs:
             --auth-mode login 2>/dev/null || echo "No previous run found"
 
       - name: Compare with previous run
+        if: always()
         run: |
           python3 /tmp/ct-common/scripts/compare-runs.py \
             --current gate-summary.json \
