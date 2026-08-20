@@ -29,6 +29,9 @@ def gen_manifest(exp, service):
     kind = exp.get('type', 'PodChaos')
     name = exp.get('name', f'{service}-unknown')
     duration = exp.get('duration', '60s')
+    # `target` allows attacking a dependency (e.g. yas-media-mock) instead of the
+    # service under test — used for dependency-degradation scenarios.
+    target = exp.get('target', service)
 
     # Common fields
     manifest = {
@@ -43,10 +46,10 @@ def gen_manifest(exp, service):
             },
         },
         'spec': {
-            'mode': 'one' if kind != 'NetworkChaos' else 'all',
+            'mode': exp.get('mode', 'one' if kind != 'NetworkChaos' else 'all'),
             'selector': {
                 'namespaces': ['app'],
-                'labelSelectors': {'app': service},
+                'labelSelectors': {'app': target},
             },
             'duration': duration,
         },
@@ -175,6 +178,7 @@ def main():
             'name': short_name,
             'file': filepath,
             'type': manifest['kind'],
+            'duration': duration,
         })
 
         print(f'nfr-to-chaos: generated {filepath}', file=sys.stderr)

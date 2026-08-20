@@ -411,9 +411,11 @@ jobs:
             NAME=$(echo "$exp" | jq -r '.name')
             FILE=$(echo "$exp" | jq -r '.file')
             TYPE=$(echo "$exp" | jq -r '.type')
-            echo "=== Running chaos experiment: $NAME (type=$TYPE) ==="
-            if timeout $(( 60 + 420 )) bash /tmp/ct-common/scripts/chaos-experiment-runner.sh \
-              "$FILE" "$NAME" "60" "${{ env.SERVICE_NAME }}" \
+            DUR=$(echo "$exp" | jq -r '.duration // "60s"')
+            DUR_SEC=$(echo "$DUR" | grep -oE '[0-9]+' | head -1)
+            echo "=== Running chaos experiment: $NAME (type=$TYPE, duration=${DUR}) ==="
+            if timeout $(( DUR_SEC + 420 )) bash /tmp/ct-common/scripts/chaos-experiment-runner.sh \
+              "$FILE" "$NAME" "$DUR_SEC" "${{ env.SERVICE_NAME }}" \
               /tmp/k6-env.txt perf "${{ env.HEALTH_PATH }}"; then
               :
             else
