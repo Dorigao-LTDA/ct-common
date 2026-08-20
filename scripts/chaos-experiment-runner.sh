@@ -2,14 +2,17 @@
 # chaos-experiment-runner.sh — Run one Chaos Mesh experiment with in-cluster k6 + canary.
 #
 # Usage:
-#   chaos-experiment-runner.sh <manifest> <exp_name> <duration_sec> <service> <k6_env_file> <k6_script_dir>
+#   chaos-experiment-runner.sh <manifest> <exp_name> <duration_sec> <service> <k6_env_file> <k6_script_dir> [health_path]
 #
-#   1. Creates k6 Job (--out json NDJSON) for chaos-traffic.js
+#   1. Creates k6 Job (handleSummary writes summary JSON) for chaos-traffic.js
 #   2. Applies chaos manifest
-#   3. Health canary (port-forward curl /health) measures real outage
+#   3. Health canary (port-forward curl health_path) measures real outage
 #   4. Waits for chaos duration
-#   5. Extracts NDJSON + converts to summary JSON via ndjson-to-summary.py
+#   5. Extracts summary JSON
 #   6. Cleans up chaos resource (--wait=false) and k6 Job
+#
+# health_path: URL path for the canary (default /health). Services with a
+#              context-path (e.g. YAS product: /product/actuator/health) override it.
 #
 # Writes: /tmp/chaos-results/<exp_name>.json (summary), recovery time to /tmp/chaos-recovery-times.txt
 set -euo pipefail
@@ -20,6 +23,7 @@ DURATION="${3:?}"
 SERVICE="${4:?}"
 K6_ENV_FILE="${5:?}"
 K6_SCRIPT_DIR="${6:?}"
+HEALTH_PATH="${7:-/health}"
 NAMESPACE="app"
 
 mkdir -p /tmp/chaos-results
@@ -98,7 +102,7 @@ echo "=== chaos-runner: monitoring recovery ==="
   OUTAGE_END=0
   CANARY_MAX=$(( DURATION + 300 ))
   for i in $(seq 1 ${CANARY_MAX}); do
-    if curl -sf --max-time 5 http://localhost:8080/health >/dev/null 2>&1; then
+    if curl -sf --max-time 5 "http://localhost:8080${HEALTH_PATH}" >/dev/null 2>&1; then
       if [ "$OUTAGE_START" -ne 0 ] && [ "$OUTAGE_END" -eq 0 ]; then
         OUTAGE_END=$(date +%s)
         echo "=== Canary: recovered at t=$((i-1))s ==="
