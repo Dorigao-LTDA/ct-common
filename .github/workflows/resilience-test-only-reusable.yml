@@ -67,7 +67,7 @@ jobs:
             helm upgrade --install chaos-mesh chaos-mesh/chaos-mesh \
               --namespace chaos-mesh --create-namespace \
               --set createCustomResource=true \
-              --version ${{ vars.CHAOS_MESH_CHART_VERSION || '2.6.3' }} \
+              --version ${{ vars.CHAOS_MESH_CHART_VERSION || '2.8.4' }} \
               --wait --timeout 5m
           fi
           kubectl get pods -n chaos-mesh --no-headers 2>/dev/null | head -5 || \
