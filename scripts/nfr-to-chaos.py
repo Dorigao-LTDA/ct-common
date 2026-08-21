@@ -62,12 +62,18 @@ def gen_manifest(exp, service):
         manifest['spec']['action'] = 'pod-kill'
 
     elif kind == 'NetworkChaos':
-        manifest['spec']['action'] = 'delay'
-        manifest['spec']['delay'] = {
-            'latency': exp.get('delay', '100ms'),
-            'correlation': exp.get('correlation', '0.5'),
-            'jitter': exp.get('jitter', '20ms'),
-        }
+        action = exp.get('action', 'delay')
+        manifest['spec']['action'] = action
+        if action == 'delay':
+            manifest['spec']['delay'] = {
+                'latency': exp.get('delay', '100ms'),
+                'correlation': exp.get('correlation', '0.5'),
+                'jitter': exp.get('jitter', '20ms'),
+            }
+        elif action == 'loss':
+            manifest['spec']['loss'] = exp.get('loss', '100%')
+            manifest['spec']['correlation'] = exp.get('correlation', '1.0')
+        # partition/duplicate/corrupt/bandwidth: no extra spec required
 
     elif kind == 'StressChaos':
         stressors = {}
