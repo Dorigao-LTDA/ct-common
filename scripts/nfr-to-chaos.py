@@ -178,7 +178,7 @@ def main():
             'name': short_name,
             'file': filepath,
             'type': manifest['kind'],
-            'duration': duration,
+            'duration': exp.get('duration', '60s'),
         })
 
         print(f'nfr-to-chaos: generated {filepath}', file=sys.stderr)
