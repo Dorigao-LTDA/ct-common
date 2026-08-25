@@ -185,6 +185,15 @@ def main():
         data = load_k6_result(ck)
         if data:
             chaos['k6_during_chaos'] = extract_k6_summary(data)
+    # Per-experiment worst-case latency (from the consolidated chaos-latency.json)
+    # — surfaces dependency-degradation hangs (e.g. media partition -> 59s max)
+    # that the recovery-time canary and the merged k6 summary do not expose.
+    cl = find_artifact(args.artifacts_dir, 'chaos-latency.json')
+    if cl:
+        try:
+            chaos['latency_per_experiment_ms'] = json.load(open(cl))
+        except (json.JSONDecodeError, OSError):
+            pass
     test_results['chaos'] = chaos
 
     # --- Optional inputs ---

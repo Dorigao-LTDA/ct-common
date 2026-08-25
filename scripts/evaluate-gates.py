@@ -109,6 +109,23 @@ def parse_mem(s):
     return int(float(s))
 
 
+def parse_duration_ms(s):
+    """Return a duration string ('5s', '500ms', '2m') as milliseconds (float)."""
+    if s is None or s == '':
+        return None
+    s = str(s).strip()
+    try:
+        if s.endswith('ms'):
+            return float(s[:-2])
+        if s.endswith('s'):
+            return float(s[:-1]) * 1000
+        if s.endswith('m'):
+            return float(s[:-1]) * 60000
+        return float(s)
+    except ValueError:
+        return None
+
+
 def get_cluster_state(service, namespace='app'):
     """Read live Deployment resources via kubectl. Return dict or None on failure."""
     # ponytail: jsonpath with -o json is simpler than parsing jsonpath output.
@@ -339,11 +356,11 @@ def main():
         return None
 
     recovery_path = find_json('chaos-recovery.json')
+    experiments = (nfr.get('resilience', {})
+                   .get('chaos_experiments', []))
     if recovery_path:
         print('\n--- Resilience Gate ---')
         recovery = json.load(open(recovery_path))
-        experiments = (nfr.get('resilience', {})
-                       .get('chaos_experiments', []))
         for exp in experiments:
             exp_name = exp.get('name', '')
             if exp_name.startswith(f'{service}-'):
@@ -379,6 +396,37 @@ def main():
             c_failed = c_metrics.get('http_req_failed', {}).get('values', {}).get('rate', 0)
             check('http_req_failed (during chaos)', c_failed, '<',
                   0.05, 'warning', 'chaos_http_req_failed')
+
+    # ============================================================
+    # Chaos Latency Gate (detect dependency-degradation hang)
+    # The health-canary recovery gate only sees /actuator/health, which does
+    # NOT depend on external services. A slow/partitioned dependency (e.g.
+    # media-service) makes the app HANG without failing health — recovery_time
+    # stays 0 and the recovery gate passes misleadingly. This gate compares the
+    # worst-case request latency (max) during each experiment against an
+    # optional nfr.yaml `latency_threshold` (e.g. "5s").
+    # ============================================================
+    latency_path = find_json('chaos-latency.json')
+    if latency_path:
+        print('\n--- Chaos Latency Gate ---')
+        try:
+            latency = json.load(open(latency_path))
+        except (json.JSONDecodeError, OSError):
+            latency = {}
+        for exp in experiments:
+            exp_name = exp.get('name', '')
+            if exp_name.startswith(f'{service}-'):
+                exp_name = exp_name[len(service) + 1:]
+            th = exp.get('latency_threshold', '')
+            if not th:
+                continue
+            th_ms = parse_duration_ms(th)
+            if th_ms is None:
+                print(f'  ! malformed latency_threshold "{th}" for {exp_name}')
+                continue
+            max_ms = (latency.get(exp_name, {}) or {}).get('max_ms', 0)
+            check(f'chaos.{exp_name}.max_latency', round(float(max_ms), 1),
+                  '<', th_ms, 'critical', f'chaos_{exp_name}_latency')
 
     # ============================================================
     # Sizing Drift Gate (CRITICAL)

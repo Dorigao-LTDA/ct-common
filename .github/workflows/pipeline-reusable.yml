@@ -457,6 +457,32 @@ jobs:
             done > chaos-results.json 2>/dev/null || true
           fi
 
+          # Per-experiment worst-case latency (max/p95 http_req_duration in ms).
+          # The merged chaos-results.json loses per-experiment attribution
+          # (NDJSON 'update' keeps the last experiment's values), so the latency
+          # gate reads this file instead. Enables detecting dependency-degradation
+          # hangs (e.g. media partition -> 59s max) that the health canary misses.
+          python3 - <<'PYEOF'
+          import json, glob, os
+          out = {}
+          for f in sorted(glob.glob('/tmp/chaos-results/*.json')):
+              exp = os.path.basename(f).replace('.json', '')
+              try:
+                  d = json.load(open(f))
+              except (json.JSONDecodeError, OSError):
+                  continue
+              vals = d.get('metrics', {}).get('http_req_duration', {}).get('values', {})
+              if not vals:
+                  continue
+              out[exp] = {
+                  'max_ms': float(vals.get('max', 0)),
+                  'p95_ms': float(vals.get('p(95)', 0)),
+              }
+          with open('chaos-latency.json', 'w') as fh:
+              json.dump(out, fh, indent=2)
+          print('chaos-latency:', json.dumps(out, indent=2))
+          PYEOF
+
       - name: Cleanup Chaos
         run: |
           # Kill any leftover k6 Jobs and ConfigMaps
@@ -479,6 +505,7 @@ jobs:
           path: |
             chaos-results.json
             chaos-recovery.json
+            chaos-latency.json
 
   # =============================================
   # Stage 7: Gate Evaluation
