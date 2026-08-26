@@ -75,6 +75,7 @@ def find_artifact(artifacts_dir, name):
         os.path.join(artifacts_dir, name),
         os.path.join(artifacts_dir, name.replace('.json', ''), name),
         os.path.join(artifacts_dir, 'perf-results', name),
+        os.path.join(artifacts_dir, 'chaos-results', name),
     ]:
         if os.path.exists(candidate):
             return candidate

@@ -30,15 +30,15 @@ import urllib.request
 MIMIR_QUERIES = {
     'memory_usage_pct': (
         'container_memory_working_set_bytes'
-        '{container="%(svc)s",namespace="app"}'
+        '{pod=~"%(svc)s-.*",namespace="app"}'
         ' / on(pod) kube_pod_container_resource_limits'
-        '{resource="memory",container="%(svc)s",namespace="app"} * 100'
+        '{resource="memory",pod=~"%(svc)s-.*",namespace="app"} * 100'
     ),
     'cpu_usage_pct': (
         'rate(container_cpu_usage_seconds_total'
-        '{container="%(svc)s",namespace="app"}[5m])'
+        '{pod=~"%(svc)s-.*",namespace="app"}[5m])'
         ' / on(pod) kube_pod_container_resource_limits'
-        '{resource="cpu",container="%(svc)s",namespace="app"} * 100'
+        '{resource="cpu",pod=~"%(svc)s-.*",namespace="app"} * 100'
     ),
     'jvm_heap_usage_pct': (
         'jvm_memory_used_bytes{area="heap",service_name="%(svc)s"}'
@@ -57,7 +57,7 @@ MIMIR_QUERIES = {
     ),
     'pod_restarts': (
         'kube_pod_container_status_restarts_total'
-        '{container="%(svc)s",namespace="app"}'
+        '{pod=~"%(svc)s-.*",namespace="app"}'
     ),
 }
 
