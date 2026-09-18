@@ -104,6 +104,44 @@ export K8S_LIMITS_MEMORY=1Gi
 
 Os scripts k6 leem essas variáveis via `__ENV` (ex.: `__ENV.K6_BASELINE_THRESHOLD_HTTP_REQ_DURATION_P95` em `perf/baseline.js`). O `evaluate-gates.py` é a exceção: relê o `nfr.yaml` direto e compara com os artefatos k6.
 
+## Manifests de caos gerados pelo `nfr-to-chaos.py`
+
+O estágio de resiliência gera os manifests em runtime, a partir de `resilience.chaos_experiments` do `nfr.yaml`:
+
+```bash
+python3 scripts/nfr-to-chaos.py --nfr nfr.yaml --service catalogo --output-dir chaos-generated
+```
+
+Cada experimento vira um arquivo `<nome-curto>.yaml` (prefixo do serviço removido: `catalogo-pod-kill` → `pod-kill.yaml`), junto com um `manifest-list.json` que o pipeline usa para iterar sobre os experimentos. O campo `target:` opcional desvia o ataque para uma dependência em vez do serviço em teste. Os manifests não têm `scheduler`: o timing fica com o pipeline (apply + espera + delete), não com o manifest.
+
+`chaos-generated/network-delay.yaml` gerado para o `svc-catalogo`:
+
+```yaml
+apiVersion: chaos-mesh.org/v1alpha1
+kind: NetworkChaos
+metadata:
+  name: catalogo-network-delay
+  namespace: app
+  labels:
+    app.kubernetes.io/name: catalogo
+    chaos-test: 'true'
+spec:
+  mode: all
+  selector:
+    namespaces:
+    - app
+    labelSelectors:
+      app: catalogo
+  duration: 120s
+  action: delay
+  delay:
+    latency: 100ms
+    correlation: '0.5'
+    jitter: 20ms
+```
+
+O mesmo `nfr.yaml` ainda gera `pod-kill.yaml` (PodChaos, `action: pod-kill`, `mode: one`) e `pod-cpu-stress.yaml` (StressChaos, CPU com `workers: 1` e `load: 80`). Tipos suportados: PodChaos, NetworkChaos, StressChaos, IOChaos, DNSChaos e HTTPChaos.
+
 ## Manutenção
 
 - **Repo canônico**: `Dorigao-LTDA/ct-common`
