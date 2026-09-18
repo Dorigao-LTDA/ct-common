@@ -102,7 +102,7 @@ export K8S_LIMITS_CPU=500m
 export K8S_LIMITS_MEMORY=1Gi
 ```
 
-Os scripts k6 leem essas variáveis via `__ENV` (ex.: `__ENV.K6_BASELINE_THRESHOLD_HTTP_REQ_DURATION_P95` em `perf/baseline.js`). O `evaluate-gates.py` não consome estas variáveis: ele relê o `nfr.yaml` e compara com os artefatos k6.
+Os scripts k6 leem essas variáveis via `__ENV` (ex.: `__ENV.K6_BASELINE_THRESHOLD_HTTP_REQ_DURATION_P95` em `perf/baseline.js`). O `evaluate-gates.py` é a exceção: relê o `nfr.yaml` direto e compara com os artefatos k6.
 
 ## Manutenção
 
